@@ -18,6 +18,7 @@
 .import fx_warp_init, fx_warp_step
 .import fx_starry_init, fx_starry_step
 .import fx_zot_init, fx_zot_step
+.import fx_worms_init, fx_worms_step
 
 FXOFF   = CORE+6        ; current effect's offset into fx_table (id * 6)
 
@@ -145,7 +146,7 @@ fx_table:
         .byte 1, 4              ; 2 Starry Night
         .word fx_zot_init, fx_zot_step
         .byte 0, 3              ; 3 Zot!
-        .word ph_init, ph_step
+        .word fx_worms_init, fx_worms_step
         .byte 0, 3              ; 4 Can of Worms
         .word ph_init, ph_step
         .byte 1, 2              ; 5 Lissajous

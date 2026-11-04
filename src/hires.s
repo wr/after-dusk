@@ -6,10 +6,10 @@
 .include "config.inc"
 
 .export plot, line, disc, clear_page, fill_page, invert_page, copy_page
-.export show_page1, show_page2, wipe_to_black
+.export show_page1, show_page2, wipe_to_black, hspan
 .import wait_ticks
 .export row_lo, row_hi, xbyte_lo, xbit_lo, xbyte_hi, xbit_hi, xmod_lo, xmod_hi
-.export sar4, shl4, shr4, sar5, shl3, shr5
+.export sar4, shl4, shr4, sar5, shl3, shr5, wvx_lo, wvx_hi, wvy_lo, wvy_hi
 
 ; scratch
 PTR   = DSCR          ; 2 bytes: row pointer
@@ -23,6 +23,14 @@ ERR   = DSX+4         ; 2
 E2    = DSX+6         ; 2
 SX    = DSX+8         ; 1 or $FF
 SY    = DSX+9
+
+; hspan
+HL    = DSX           ; 2: left end, clipped
+HR    = DSX+2         ; 2: right end, clipped
+HB0   = DSX+4         ; first byte
+HB1   = DSX+5         ; last byte
+HM0   = DSX+6         ; its mask
+HM1   = DSX+7
 
 ; disc
 CX    = DSX           ; 2: centre
@@ -295,6 +303,113 @@ disc:
 
 squares:
         .byte 0, 1, 4, 9, 16, 25, 36, 49, 64, 81, 100
+
+; ---------------------------------------------------------------- hspan
+; A horizontal run of dots from (PX, PY) to (PX2, PY) on PAGE in mode PCOL,
+; clipped to the screen; nothing when PX2 < PX. A byte at a time, so a run
+; costs about as much as two or three dots. PX/PX2/PY are left unchanged.
+hspan:
+        lda PY+1
+        bne @out
+        ldy PY
+        cpy #192
+        bcs @out
+        lda PX                  ; HL = max(PX, 0)
+        sta HL
+        lda PX+1
+        sta HL+1
+        bpl :+
+        stz HL
+        stz HL+1
+:       lda PX2                 ; HR = min(PX2, 279)
+        sta HR
+        lda PX2+1
+        sta HR+1
+        bmi @out
+        beq @rok
+        cmp #1
+        bne @rclip
+        lda HR
+        cmp #24
+        bcc @rok
+@rclip: lda #<279
+        sta HR
+        lda #>279
+        sta HR+1
+@rok:   lda HR+1                ; empty?
+        cmp HL+1
+        bcc @out
+        bne @go
+        lda HR
+        cmp HL
+        bcs @go
+@out:   rts
+@go:    lda row_lo,y
+        sta PTR
+        lda PAGE
+        eor #$20
+        eor row_hi,y
+        sta PTR+1
+        ldx HL                  ; first byte and the dots from HL rightwards
+        lda HL+1
+        bne :+
+        lda xbyte_lo,x
+        sta HB0
+        ldy xmod_lo,x
+        bra :++
+:       lda xbyte_hi,x
+        sta HB0
+        ldy xmod_hi,x
+:       lda span_l,y
+        sta HM0
+        ldx HR                  ; last byte and the dots up to HR
+        lda HR+1
+        bne :+
+        lda xbyte_lo,x
+        sta HB1
+        ldy xmod_lo,x
+        bra :++
+:       lda xbyte_hi,x
+        sta HB1
+        ldy xmod_hi,x
+:       lda span_r,y
+        sta HM1
+        ldy HB0
+        cpy HB1
+        bne @wide
+        lda HM0
+        and HM1
+        bra span_apply
+@wide:  lda HM0
+        jsr span_apply
+:       iny
+        cpy HB1
+        beq :+
+        lda #$7F
+        jsr span_apply
+        bra :-
+:       lda HM1
+        ; fall through
+
+; span_apply: dots A in byte Y of (PTR), in mode PCOL. Keeps Y.
+span_apply:
+        ldx PCOL
+        beq @clr
+        cpx #1
+        beq @set
+        eor (PTR),y
+        sta (PTR),y
+        rts
+@set:   ora (PTR),y
+        sta (PTR),y
+        rts
+@clr:   eor #$7F
+        and (PTR),y
+        sta (PTR),y
+        rts
+
+span_l: .byte $7F, $7E, $7C, $78, $70, $60, $40   ; dots m..6
+span_r: .byte $01, $03, $07, $0F, $1F, $3F, $7F   ; dots 0..m
 
 ; ---------------------------------------------------------------- pages
 ; clear_page: zero the 8K page at PAGE. fill_page: fill it with A.

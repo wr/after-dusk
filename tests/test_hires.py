@@ -126,3 +126,26 @@ def test_show_pages(s):
     assert s.peek(0x24) == 1
     s.call("show_page1")
     assert s.peek(0x24) == 0
+
+
+@pytest.mark.parametrize("x0,x1,y", [(0, 0, 0), (3, 17, 5), (6, 7, 9), (0, 279, 191), (-5, 4, 2), (270, 300, 3), (13, 13, 100)])
+@pytest.mark.parametrize("col", [SET, CLEAR, INVERT])
+def test_hspan(s, x0, x1, y, col):
+    s.fill_page(PAGE1, 0x2A)
+    before = s.page_pixels()
+    s.set_point(x0, y)
+    s.set_point(x1, y, PX2, PY2)
+    s.call("hspan", zp={PCOL: col, PAGE: PAGE1})
+    run = {(x, y) for x in range(max(0, x0), min(279, x1) + 1)}
+    want = before | run if col == SET else before - run if col == CLEAR else before ^ run
+    assert s.page_pixels() == want
+    assert all(b & 0x80 == 0 for b in s.page_bytes(PAGE1))
+
+
+def test_hspan_off_screen(s):
+    s.fill_page(PAGE1, 0)
+    for x0, x1, y in [(-9, -1, 5), (280, 290, 5), (10, 20, 192), (10, 20, -1), (20, 10, 5)]:
+        s.set_point(x0, y)
+        s.set_point(x1, y, PX2, PY2)
+        s.call("hspan", zp={PCOL: SET, PAGE: PAGE1})
+    assert s.page_pixels() == set()

@@ -5,6 +5,7 @@ xbyte_lo/xbit_lo/xmod_lo 256 entries: for x 0-255, byte within the row, bit mask
 xbyte_hi/xbit_hi/xmod_hi  80 entries: the same for x 256-335 (past 279 only the
                           sprite engine uses them, for cells offset to the right)
 """
+import math
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -43,6 +44,12 @@ def main():
         table("sar5", [((h - 256 if h & 0x80 else h) >> 5) & 0xFF for h in range(256)]),
         table("shl3", [(h << 3) & 0xF8 for h in range(256)]),
         table("shr5", [lo >> 5 for lo in range(256)]),
+        "; Can of Worms: per-step motion for heading a (0-255 = a full turn), 8.8",
+        ";   x: 2 cos, y: 1.7 sin (y grows downwards)",
+        table("wvx_lo", [round(2 * math.cos(a * math.pi / 128) * 256) & 0xFF for a in range(256)]),
+        table("wvx_hi", [(round(2 * math.cos(a * math.pi / 128) * 256) >> 8) & 0xFF for a in range(256)]),
+        table("wvy_lo", [round(1.7 * math.sin(a * math.pi / 128) * 256) & 0xFF for a in range(256)]),
+        table("wvy_hi", [(round(1.7 * math.sin(a * math.pi / 128) * 256) >> 8) & 0xFF for a in range(256)]),
     ]
     (ROOT / "src/tables.inc").write_text("\n".join(parts) + "\n")
 
