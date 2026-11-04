@@ -29,6 +29,11 @@ SPZ     = $30
 ; ---- zero page: private to the running effect ($40-$7F) ----
 FXZ     = $40
 
+; ---- zero page: extra drawing scratch ($80-$8F, hires.s) ----
+; After Dusk never returns to BASIC or DOS (Ctrl-Reset restarts it), so the
+; upper zero page is ours.
+DSX     = $80
+
 ; ---- seed POKEd by HELLO ----
 SEED_LO = $0300
 SEED_HI = $0301
