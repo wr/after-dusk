@@ -20,3 +20,7 @@ def run_mame(script, seconds, driver="apple2c", disk=None):
 
 def test_boot(built):
     run_mame("boot.lua", 30)
+
+
+def test_timing(built):
+    run_mame("timing.lua", 40)

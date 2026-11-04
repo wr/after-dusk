@@ -3,11 +3,14 @@
 .include "config.inc"
 
 .export start, restart
+.import timing_init, wait_ticks
 
 .segment "CODE"
 
 start:                          ; BRUN enters here ($6000)
 restart:
+        sei                     ; interrupts stay masked, always
+        cld
         sta TXTCLR              ; graphics
         sta MIXCLR              ; full screen
         sta LOWSCR              ; page 1
@@ -29,8 +32,11 @@ restart:
 
         lda #$FF
         sta ST_FX
+        jsr timing_init
 
 @loop:  inc ST_BEAT
-        bne @loop
+        bne :+
         inc ST_BEAT+1
+:       lda #1
+        jsr wait_ticks
         bra @loop
