@@ -1,0 +1,7 @@
+build/
+.tools/
+.superpowers/
+src/tables.inc
+src/art.inc
+__pycache__/
+.pytest_cache/
