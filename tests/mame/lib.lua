@@ -15,6 +15,21 @@ T.frame = 0
 T.ST_FX, T.ST_STARTS, T.ST_BEAT, T.ST_TIMING, T.ST_FAST = 0x0310, 0x0311, 0x0312, 0x0314, 0x0315
 T.SEED = 0x0300
 
+T.TICKS = 0x22
+
+-- Addresses from the linker's label file (same layout for every build).
+local labels
+function T.label(name)
+  if not labels then
+    labels = {}
+    for line in io.lines("build/afterdusk.lbl") do
+      local addr, sym = line:match("^al (%x+) %.(%S+)")
+      if addr then labels[sym] = tonumber(addr, 16) end
+    end
+  end
+  return labels[name]
+end
+
 function T.peek(a) return mem:read_u8(a) end
 function T.peek16(a) return mem:read_u8(a) + 256 * mem:read_u8(a + 1) end
 function T.poke(a, v) mem:write_u8(a, v) end
@@ -64,18 +79,24 @@ local function guard(offset, data, mask)
   end
   return data
 end
-T.taps = {
+-- Kept in globals: a tap or notifier whose handle is garbage-collected
+-- silently stops working.
+_G.after_dusk_taps = {
   mem:install_read_tap(0xC030, 0xC03F, "speaker_r", guard),
   mem:install_write_tap(0xC030, 0xC03F, "speaker_w", guard),
 }
 
 function T.run(fn)
+  -- MAME re-runs the autoboot script after a hard reset; the first run is
+  -- still going, so the second must not start another.
+  if _G.after_dusk_test_running then return end
+  _G.after_dusk_test_running = true
   local co = coroutine.create(function()
     fn()
     print("INFO done after " .. T.frame .. " frames")
     mac:exit()
   end)
-  T.sub = emu.add_machine_frame_notifier(function()
+  _G.after_dusk_sub = emu.add_machine_frame_notifier(function()
     T.frame = T.frame + 1
     if coroutine.status(co) == "suspended" then
       local ok, err = coroutine.resume(co)

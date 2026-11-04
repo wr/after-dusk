@@ -6,7 +6,8 @@
 .include "config.inc"
 
 .export plot, line, disc, clear_page, fill_page, invert_page, copy_page
-.export show_page1, show_page2
+.export show_page1, show_page2, wipe_to_black
+.import wait_ticks
 .export row_lo, row_hi, xbyte_lo, xbit_lo, xbyte_hi, xbit_hi
 
 ; scratch
@@ -346,6 +347,33 @@ copy_page:
         inc PTR+1
         dex
         bne @l
+        rts
+
+; wipe_to_black: clear page 1 from top to bottom, 8 rows per tick
+; (24 ticks, about 0.4 s).
+wipe_to_black:
+        stz SRC                 ; SRC = first row of this band
+@band:  ldx #8
+@row:   phx
+        ldx SRC
+        lda row_lo,x
+        sta PTR
+        lda row_hi,x
+        sta PTR+1
+        ldy #39
+        lda #0
+:       sta (PTR),y
+        dey
+        bpl :-
+        inc SRC
+        plx
+        dex
+        bne @row
+        lda #1
+        jsr wait_ticks
+        lda SRC
+        cmp #192
+        bne @band
         rts
 
 show_page1:
