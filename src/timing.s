@@ -18,7 +18,7 @@
 
 .include "config.inc"
 
-.export timing_init, wait_ticks, delay_tick, vbl_poll, timing_sync
+.export timing_init, wait_ticks, delay_tick, vbl_poll, timing_sync, timing_restart
 
 IOUDISOFF = $C07F     ; write: allow access to the IOU switches
 ENVBL     = $C05B     ; write: enable the VBL interrupt source
@@ -29,6 +29,7 @@ ROMID     = $FBBF     ; $05 on the IIc Plus
 NLEFT     = CORE+3    ; ticks still to wait
 FRAMES    = CORE+7    ; 2: vertical blanks counted so far
 NEXT      = CORE+9    ; 2: the frame the current step ends on
+LASTF     = CORE+4    ; 2: FRAMES when the last wait ended
 
 .segment "CODE"
 
@@ -72,16 +73,12 @@ wait_edge:
         rts
 
 ; wait_ticks: A = n. Waits until n ticks after the end of the last wait
-; (VBL mode) or for n ticks (fallback), and adds n to TICKS. A step that ran
-; past its deadline starts the next one from now rather than catching up.
+; (VBL mode) or for n ticks (fallback). Adds the frames that really passed
+; since the last wait to TICKS (n in fallback). A step that ran past its
+; deadline starts the next one from now rather than catching up.
 wait_ticks:
         sta NLEFT
-        clc
-        adc TICKS
-        sta TICKS
-        bcc :+
-        inc TICKS+1
-:       lda NLEFT
+        lda NLEFT
         beq @done
         lda ST_TIMING
         beq @slow
@@ -99,18 +96,36 @@ wait_ticks:
         lda FRAMES+1
         sbc NEXT+1
         bmi @vbl
-        ora NLEFT               ; late (FRAMES > NEXT)? count from now
-        beq @done
-        jmp timing_sync
+        sec                     ; TICKS += frames since the last wait: real
+        lda FRAMES              ; time, even for a step that ran long
+        sbc LASTF
+        clc
+        adc TICKS
+        sta TICKS
+        bcc :+
+        inc TICKS+1
+:       lda FRAMES
+        sta LASTF
+        lda FRAMES+1
+        sta LASTF+1
+        lda NLEFT               ; late (FRAMES > NEXT)? the next step counts
+        beq @done               ; from now rather than catching up
+        jmp timing_restart
 @done:  rts
-@slow:  jsr delay_tick
+@slow:  lda NLEFT               ; fallback: TICKS += n
+        clc
+        adc TICKS
+        sta TICKS
+        bcc @delay
+        inc TICKS+1
+@delay: jsr delay_tick
         lda ST_FAST
         beq :+
         jsr delay_tick          ; IIc Plus: four times the cycles
         jsr delay_tick
         jsr delay_tick
 :       dec NLEFT
-        bne @slow
+        bne @delay
         rts
 
 ; vbl_poll: count a vertical blank into FRAMES if one has happened since the
@@ -128,8 +143,17 @@ vbl_poll:
 @no:    pla
         rts
 
-; timing_sync: the next wait's ticks count from now (after long set-up work).
+; timing_sync: the next wait's ticks count from now, and the time until now
+; isn't counted into TICKS (after long set-up work).
 timing_sync:
+        lda FRAMES
+        sta LASTF
+        lda FRAMES+1
+        sta LASTF+1
+        ; fall through
+; timing_restart: the next wait's deadline counts from now; the time so far
+; still counts into TICKS.
+timing_restart:
         lda FRAMES
         sta NEXT
         lda FRAMES+1

@@ -21,6 +21,7 @@
 .export zot_seg, zot_nseg, zot_phase, zot_nbolt, zot_nflash, zot_nflick
 
 .import rng_next, rng_below, show_page1, show_page2, wait_ticks, vbl_poll
+.import timing_restart
 .import row_lo, row_hi, xbyte_lo, xmod_lo, xbyte_hi, xmod_hi
 
 MAXSEG = 64
@@ -167,6 +168,7 @@ fx_zot_step:
         bcs @out
         inc zot_nflash
         jsr show_page2
+        jsr timing_restart      ; a full tick of flash, however long the bolt took
         lda #1
         jsr wait_ticks
         jmp show_page1

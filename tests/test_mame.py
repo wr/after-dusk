@@ -77,3 +77,8 @@ def test_boots_write_protected(built, tmp_path):
     d = disk_copy(built / "AFTERDUSK.dsk", "ro.dsk", tmp_path)
     os.chmod(d, 0o444)
     run_mame("boot.lua", 75, disk=d)
+
+
+@pytest.mark.skipif(not os.environ.get("AD_SOAK"), reason="long: set AD_SOAK=1 (8 emulated hours)")
+def test_soak(built, tmp_path):
+    run_mame("soak.lua", 8 * 3600 + 120, disk=disk_copy(built / "AFTERDUSK.dsk", "soak.dsk", tmp_path))
