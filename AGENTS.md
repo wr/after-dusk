@@ -68,6 +68,7 @@ that). When an effect can't keep up, it gets fewer objects, never a slower rate.
 
 - Flying Toasters: 4 toasters and 3 slices of toast (7 toasters were planned).
 - Warp: 64 stars (70 were planned).
+- Starry Night: up to 85 stars (about 90 were planned; star records must fit one 8-bit index).
 
 ## Never
 
