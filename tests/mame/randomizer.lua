@@ -4,6 +4,18 @@ local T = dofile("tests/mame/lib.lua")
 local function starts() return T.peek(T.ST_STARTS) end
 local function ticks() return T.peek16(T.TICKS) end
 local function changed_from(s) return function() return starts() ~= s end end
+local function beat() return T.peek16(T.ST_BEAT) end
+
+-- Wait until the current effect is really running: it has taken at least
+-- 3 steps since it started (so its wipe and set-up are over) and has plenty
+-- of its time left.
+local function wait_mid_effect()
+  local st, b0 = starts(), beat()
+  return T.wait_until(function()
+    if starts() ~= st then st, b0 = starts(), beat() end
+    return (beat() - b0) % 65536 >= 3 and ticks() < 60
+  end, 60 * 10)
+end
 
 T.run(function()
   T.wait_started()
@@ -26,11 +38,12 @@ T.run(function()
 
   -- 2. A key in the middle of an effect skips within half a second.
   for k = 1, 20 do
-    T.check(T.wait_until(function() local t = ticks(); return t >= 4 and t < 60 end, 60 * 10),
-            "never reached the middle of an effect")
-    local s = starts()
+    T.check(wait_mid_effect(), "never reached the middle of an effect")
+    local s, fx, t0 = starts(), T.peek(T.ST_FX), T.frame
     T.press(" ")
-    T.check(T.wait_until(changed_from(s), 30), "key " .. k .. " did not skip within 30 frames")
+    local ok = T.wait_until(changed_from(s), 90)
+    T.check(ok and T.frame - t0 <= 30, string.format(
+      "key %d did not skip within 30 frames (effect %d, took %d)", k, fx, T.frame - t0))
     T.wait_frames(30)
   end
 
