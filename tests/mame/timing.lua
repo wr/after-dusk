@@ -3,7 +3,8 @@
 local T = dofile("tests/mame/lib.lua")
 T.run(function()
   T.wait_started()
-  T.wait_frames(60)
+  T.check(T.wait_until(function() return T.peek16(T.ST_BEAT) >= 10 end, 60 * 10),
+          "the first effect never got going")         -- start-up takes a second
   T.check(T.peek(T.ST_TIMING) == 1, "vertical-blank pacing not detected (fell back to delays)")
   local st, b1 = T.peek(T.ST_STARTS), T.peek16(T.ST_BEAT)
   T.wait_frames(600)
