@@ -3,7 +3,7 @@ import random
 import pytest
 
 from fxcommon import ALLOWED, TICK, check_bit7, check_in_bounds, start
-from sim import PAGE1
+from sim import PAGE1, ST_TIMING, VblLatch
 
 FX = 3
 
@@ -88,3 +88,25 @@ def test_near_wrap(s):
     for _ in range(200):
         s.step()
     assert s.writes_outside(*ALLOWED) == []
+
+
+def test_flash_is_a_whole_frame(built):
+    """The flash starts at a vertical blank and lasts a full frame."""
+    s = start(FX, prepare=pattern)
+    VblLatch(s)
+    s.poke(ST_TIMING, 1)
+    events = []
+    s.mem.write_hooks[0xC055] = lambda v: events.append(("page2", s.mpu.processorCycles))
+    s.mem.write_hooks[0xC054] = lambda v: events.append(("page1", s.mpu.processorCycles))
+    flashes = 0
+    for _ in range(600):
+        before = s.peek(s.addr("zot_nflash"))
+        events.clear()
+        s.step()
+        if s.peek(s.addr("zot_nflash")) != before:
+            flashes += 1
+            on = [c for e, c in events if e == "page2"][0]
+            off = [c for e, c in events if e == "page1" and c > on][0]
+            assert on % 17030 < 400, "the flash should start just after a blank"
+            assert off - on >= 17030 - 400, "the flash should last a whole frame"
+    assert flashes >= 2

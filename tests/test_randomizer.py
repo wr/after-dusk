@@ -107,3 +107,24 @@ def test_key_ends_effect(s):
     s.poke(0xC000, 0xA0)               # a key arrives
     s.call("step_once", max_cycles=200_000)
     assert s.carry()
+
+
+@pytest.mark.parametrize("fx", range(6))
+def test_fallback_pacing(built, fx):
+    """Without vertical blank, a step (work plus wait) still takes about its
+    ticks, and TICKS still counts its ticks."""
+    from fxcommon import fx_entry
+    from fxcommon import start as fx_start
+    s = fx_start(fx)
+    s.poke(0x2B, fx * 6)                  # FXOFF: the randomizer's current effect
+    ticks = fx_entry(s, fx)[3]
+    for _ in range(40):                   # settle (worms only eat once their tails start)
+        s.step()
+    periods = []
+    for _ in range(24):
+        t0 = s.peek16(TICKS)
+        periods.append(s.call("step_once", max_cycles=2_000_000))
+        assert (s.peek16(TICKS) - t0) & 0xFFFF == ticks
+    median = sorted(periods)[len(periods) // 2]
+    want = ticks * 17030
+    assert abs(median - want) <= want * 0.25, (median, want)

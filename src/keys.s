@@ -6,12 +6,22 @@
 
 .segment "CODE"
 
-; key_pressed: carry set if a key is waiting (and consumes it), else clear.
+; key_pressed: carry set for a new key press (and consumes it), else clear.
+; The IIc repeats a held key, so after a press, further key strobes are
+; ignored until a poll sees no key down ($C010 bit 7 is "any key down").
 key_pressed:
         lda KBD
-        bpl @none
-        bit KBDSTRB             ; clear the strobe
-        sec
+        bmi @strobe
+        lda KBDSTRB             ; no new key: has the held one been let go?
+        bmi @no
+        stz KEYHELD
+@no:    clc
         rts
-@none:  clc
+@strobe:
+        lda KBDSTRB             ; clear the strobe
+        lda KEYHELD
+        bne @no                 ; the same key, repeating
+        lda #1
+        sta KEYHELD
+        sec
         rts

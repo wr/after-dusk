@@ -66,6 +66,7 @@ setup:
         lda #PAGE2
         sta PAGE
         jsr clear_page
+        stz KEYHELD
         jsr timing_init         ; reads the ROM: before the language card
         jsr sprite_setup        ; language card RAM in from here on
         jsr make_tables
@@ -109,9 +110,25 @@ step_once:
         bne :+
         inc ST_BEAT+1
 :       ldx FXOFF
+        lda ST_TIMING
+        beq @slow
         lda fx_table+5,x
         jsr wait_ticks
-        jsr key_pressed
+        bra @keys
+@slow:  ldy ST_FX               ; no vertical blank: wait only what the step's
+        lda fx_slow,y           ; own work leaves of its ticks, then count
+        jsr wait_ticks          ; its full ticks
+        ldx FXOFF
+        ldy ST_FX
+        lda fx_table+5,x
+        sec
+        sbc fx_slow,y
+        clc
+        adc TICKS
+        sta TICKS
+        bcc @keys
+        inc TICKS+1
+@keys:  jsr key_pressed
         bcs @end
         lda TICKS               ; carry set once TICKS >= FX_TICKS
         cmp #<FX_TICKS
@@ -141,6 +158,13 @@ normalize_display:
 @done:  rts
 
 ; ---------------------------------------------------------------- table
+; Without vertical blank (the cycle-counted fallback), ticks to wait after
+; each effect's step: its ticks minus its typical work (measured medians:
+; toasters 2.7 ticks, Warp 1.6, Starry Night 0.1, Zot! idle, worms 2.1,
+; Lissajous 0.25).
+fx_slow:
+        .byte 1, 0, 4, 3, 1, 2
+
 ; Per effect: init, step, wipe first (1/0), ticks per step.
 fx_table:
         .word fx_toasters_init, fx_toasters_step

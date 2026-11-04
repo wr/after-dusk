@@ -42,6 +42,14 @@ folder. The character ROM, keyboard ROM and speech-chip ROM are zero-filled plac
 Dusk shows no text and only checks that some key was pressed, so the tests don't need them. MAME
 reports wrong checksums and "might not run correctly", and runs anyway.
 
+### The long ones
+
+- `pacing.lua` checks every effect's real rate (steps per 300 frames) on the release disk.
+- `soak.lua` runs 8 emulated hours on the release disk: still running every minute, all six
+  effects seen, no effect twice in a row, 3 minutes each on average. It takes about 13 minutes
+  of real time, so pytest skips it unless `AD_SOAK=1` is set. First full run (2026-11-04):
+  160 effects, 180.5 s average, passed.
+
 ### Lessons
 
 - `SDL_VIDEODRIVER=dummy` is what keeps MAME from opening a window on macOS.

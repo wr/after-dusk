@@ -36,17 +36,23 @@ class Mem:
         self.written = set()
         self.reads = set()
         self.watch_reads = ()
+        self.read_hooks = {}       # address -> function() returning the byte read
+        self.write_hooks = {}      # address -> function(value)
 
     def __getitem__(self, a):
         if 0xC030 <= a <= 0xC03F:
             raise SpeakerError(f"speaker read at ${a:04X}")
         if self.watch_reads and a in self.watch_reads:
             self.reads.add(a)
+        if self.read_hooks and a in self.read_hooks:
+            return self.read_hooks[a]()
         return self.ram[a]
 
     def __setitem__(self, a, v):
         if 0xC030 <= a <= 0xC03F:
             raise SpeakerError(f"speaker write at ${a:04X}")
+        if self.write_hooks and a in self.write_hooks:
+            self.write_hooks[a](v)
         self.ram[a] = v & 0xFF
         if self.track:
             self.written.add(a)
@@ -152,3 +158,28 @@ class Sim:
         for x, y in pixels:
             a = row_base(y, page) + x // 7
             self.mem.ram[a] |= 1 << (x % 7)
+
+
+class VblLatch:
+    """The IIc's vertical-blank latch, timed by the simulator's cycle count:
+    $C019 bit 7 sets at every frame boundary (17,030 cycles) and stays set
+    until $C070 is read. stuck_after: once that many frames have passed, the
+    latch stops clearing (a broken machine, for the probe's sake)."""
+
+    def __init__(self, sim, stuck_after=None):
+        self.sim = sim
+        self.cleared = self.frame()
+        self.stuck_after = stuck_after
+        sim.mem.read_hooks[0xC019] = self.read
+        sim.mem.read_hooks[0xC070] = self.clear
+
+    def frame(self):
+        return self.sim.mpu.processorCycles // 17030
+
+    def read(self):
+        return 0x80 if self.frame() > self.cleared else 0x00
+
+    def clear(self):
+        if self.stuck_after is None or self.frame() < self.stuck_after:
+            self.cleared = self.frame()
+        return 0

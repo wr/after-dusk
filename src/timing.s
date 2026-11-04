@@ -47,12 +47,16 @@ timing_init:
         bit RSTVBL              ; clear the latch...
         bit VBLINT
         bmi @no                 ; ...a latch that won't clear is no use
-        jsr wait_edge           ; two clean edges in a row means it works
-        bcc @no
+        jsr wait_edge           ; two clean edges in a row means it works,
+        bcc @no                 ; and the latch must clear after each one
         bit RSTVBL
+        bit VBLINT
+        bmi @no
         jsr wait_edge
         bcc @no
         bit RSTVBL
+        bit VBLINT
+        bmi @no
         inc ST_TIMING
 @no:    rts
 

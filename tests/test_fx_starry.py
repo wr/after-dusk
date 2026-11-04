@@ -128,3 +128,14 @@ def test_near_wrap(s):
     s.start_tracking()
     run(s, 50)
     assert s.writes_outside(*ALLOWED) == []
+
+
+@pytest.mark.parametrize("seed", [0xBB9C, 0x634A])
+def test_big_city_keeps_all_windows(built, seed):
+    """A tall, wide city has more than 800 windows; every one is kept."""
+    s = Sim()
+    s.poke16(0x20, seed)
+    s.call("fx_starry_init", max_cycles=3_000_000)
+    w = windows(s)
+    assert len(w) > 800
+    assert max(x for x, _, _ in w) > 240              # the rightmost buildings have windows

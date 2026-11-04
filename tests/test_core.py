@@ -2,7 +2,7 @@ from collections import Counter
 
 import pytest
 
-from sim import KBD, KBDSTRB, RNG, SEED, ST_FAST, ST_TIMING, TICKS, Sim
+from sim import KBD, KBDSTRB, RNG, SEED, ST_FAST, ST_TIMING, TICKS, Sim, VblLatch
 
 TICK = 17030
 
@@ -73,10 +73,8 @@ def test_key_waiting(s):
 
 def test_no_key(s):
     s.poke(KBD, 0x41)
-    s.mem.watch_reads = {KBDSTRB}
     s.call("key_pressed")
     assert not s.carry()
-    assert KBDSTRB not in s.mem.reads
 
 
 @pytest.mark.parametrize("fast,factor", [(0, 1), (1, 4)])
@@ -101,3 +99,35 @@ def test_timing_init_plain_iic(s):
     s.poke(0xFBBF, 0xFF)
     s.call("timing_init", max_cycles=2_000_000)
     assert s.peek(ST_FAST) == 0
+
+
+def test_held_key_skips_once(s):
+    """The IIc repeats a held key: only the first press counts until it's let go."""
+    s.poke(KBDSTRB, 0x80)                 # any-key-down
+    s.poke(KBD, 0xC1)
+    s.call("key_pressed")
+    assert s.carry()
+    for _ in range(5):                    # auto-repeat while it's held
+        s.poke(KBD, 0xC1)
+        s.call("key_pressed")
+        assert not s.carry()
+    s.poke(KBDSTRB, 0x00)                 # let go
+    s.poke(KBD, 0x41)
+    s.call("key_pressed")
+    assert not s.carry()
+    s.poke(KBDSTRB, 0x80)                 # a new press counts again
+    s.poke(KBD, 0xC2)
+    s.call("key_pressed")
+    assert s.carry()
+
+
+def test_probe_accepts_a_real_latch(s):
+    VblLatch(s)
+    s.call("timing_init", max_cycles=2_000_000)
+    assert s.peek(ST_TIMING) == 1
+
+
+def test_probe_rejects_a_latch_that_stops_clearing(s):
+    VblLatch(s, stuck_after=1)            # sets once, then never clears
+    s.call("timing_init", max_cycles=2_000_000)
+    assert s.peek(ST_TIMING) == 0

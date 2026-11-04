@@ -47,6 +47,7 @@ ST_STARTS = $0311             ; effects started, wraps
 ST_BEAT   = $0312             ; 16-bit steps since boot, wraps
 ST_TIMING = $0314             ; 1 = vertical-blank pacing, 0 = cycle-counted
 ST_FAST   = $0315             ; 1 = IIc Plus (4 MHz) detected
+KEYHELD   = $0316             ; 1 while the key that last skipped is still down
 
 ; ---- RAM private to the running effect ----
 FXRAM     = $0800             ; $0800-$1FFF

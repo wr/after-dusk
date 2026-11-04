@@ -11,7 +11,7 @@
 .import rng_next, rng_below, plot, line, show_page1
 .import row_lo, row_hi, xbyte_lo, xbit_lo, xbyte_hi, xbit_hi
 
-MAXWIN  = 800
+MAXWIN  = 1300                  ; a tall, wide city has up to ~1300
 NSTARS  = 85                    ; x 3 bytes must stay under 256 (one Y index)
 MAXANT  = 12
 
@@ -765,7 +765,7 @@ rnd_win:
 :       jsr rng_next
         sta T0
         lda RNG+1
-        and #3
+        and #7                  ; 11 bits: up to 2047
         sta T1
         cmp str_nwin+1
         bcc @ok

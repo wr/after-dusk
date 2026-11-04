@@ -167,8 +167,10 @@ fx_zot_step:
         cmp #64
         bcs @out
         inc zot_nflash
+        jsr timing_restart      ; wait for the next blank, so the flash fills
+        lda #1                  ; one whole frame, however long the bolt took
+        jsr wait_ticks
         jsr show_page2
-        jsr timing_restart      ; a full tick of flash, however long the bolt took
         lda #1
         jsr wait_ticks
         jmp show_page1
