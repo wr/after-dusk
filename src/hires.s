@@ -9,6 +9,7 @@
 .export show_page1, show_page2, wipe_to_black
 .import wait_ticks
 .export row_lo, row_hi, xbyte_lo, xbit_lo, xbyte_hi, xbit_hi, xmod_lo, xmod_hi
+.export sar4, shl4, shr4, sar5, shl3, shr5
 
 ; scratch
 PTR   = DSCR          ; 2 bytes: row pointer

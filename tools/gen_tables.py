@@ -35,6 +35,14 @@ def main():
         table("xbyte_hi", [x // 7 for x in xs_hi]),
         table("xbit_hi", [1 << (x % 7) for x in xs_hi]),
         table("xmod_hi", [x % 7 for x in xs_hi]),
+        "; Warp: v >> 4 and v >> 5 of a signed 8.8 value, as two lookups and an OR:",
+        ";   (hi:lo) >> n = sarN[hi] : (shlM[hi] | shrN[lo]), M = 8 - n",
+        table("sar4", [((h - 256 if h & 0x80 else h) >> 4) & 0xFF for h in range(256)]),
+        table("shl4", [(h << 4) & 0xF0 for h in range(256)]),
+        table("shr4", [lo >> 4 for lo in range(256)]),
+        table("sar5", [((h - 256 if h & 0x80 else h) >> 5) & 0xFF for h in range(256)]),
+        table("shl3", [(h << 3) & 0xF8 for h in range(256)]),
+        table("shr5", [lo >> 5 for lo in range(256)]),
     ]
     (ROOT / "src/tables.inc").write_text("\n".join(parts) + "\n")
 

@@ -67,6 +67,7 @@ checks the worst step against `ticks × 17,030 − 300` cycles and the median ag
 that). When an effect can't keep up, it gets fewer objects, never a slower rate. Final counts:
 
 - Flying Toasters: 4 toasters and 3 slices of toast (7 toasters were planned).
+- Warp: 64 stars (70 were planned).
 
 ## Never
 

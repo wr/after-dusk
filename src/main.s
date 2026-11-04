@@ -15,6 +15,7 @@
 .import clear_page, copy_page, show_page1, wipe_to_black, plot
 .import sprite_setup
 .import fx_toasters_init, fx_toasters_step
+.import fx_warp_init, fx_warp_step
 
 FXOFF   = CORE+6        ; current effect's offset into fx_table (id * 6)
 
@@ -136,7 +137,7 @@ normalize_display:
 fx_table:
         .word fx_toasters_init, fx_toasters_step
         .byte 1, 4              ; 0 Flying Toasters
-        .word ph_init, ph_step
+        .word fx_warp_init, fx_warp_step
         .byte 1, 2              ; 1 Warp
         .word ph_init, ph_step
         .byte 1, 4              ; 2 Starry Night
