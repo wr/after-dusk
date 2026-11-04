@@ -7,10 +7,18 @@
 ; we only poll the latch. timing_init probes it, because emulators and
 ; machines differ: no clean edge means we fall back to cycle-counted waits
 ; (four times longer on the 4 MHz IIc Plus).
+;
+; The latch holds only one blank, so a step that works for longer than a
+; frame would lose the rest. vbl_poll counts the latch into FRAMES and
+; clears it; effects whose steps can take more than a frame call it during
+; their work (the sprite engine does it for every sprite). wait_ticks then
+; waits until FRAMES reaches a deadline n ticks after the last one, so a
+; step's period is n ticks however long it worked, as long as it finished
+; within them.
 
 .include "config.inc"
 
-.export timing_init, wait_ticks, delay_tick
+.export timing_init, wait_ticks, delay_tick, vbl_poll, timing_sync
 
 IOUDISOFF = $C07F     ; write: allow access to the IOU switches
 ENVBL     = $C05B     ; write: enable the VBL interrupt source
@@ -19,6 +27,8 @@ RSTVBL    = $C070     ; read: clear the VBL latch
 ROMID     = $FBBF     ; $05 on the IIc Plus
 
 NLEFT     = CORE+3    ; ticks still to wait
+FRAMES    = CORE+7    ; 2: vertical blanks counted so far
+NEXT      = CORE+9    ; 2: the frame the current step ends on
 
 .segment "CODE"
 
@@ -61,9 +71,9 @@ wait_edge:
 @yes:   sec
         rts
 
-; wait_ticks: A = n. Waits n ticks and adds n to TICKS. In VBL mode a
-; blank that happened while the caller was working counts as the first,
-; so a step that takes less than n ticks is paced to exactly n.
+; wait_ticks: A = n. Waits until n ticks after the end of the last wait
+; (VBL mode) or for n ticks (fallback), and adds n to TICKS. A step that ran
+; past its deadline starts the next one from now rather than catching up.
 wait_ticks:
         sta NLEFT
         clc
@@ -75,11 +85,23 @@ wait_ticks:
         beq @done
         lda ST_TIMING
         beq @slow
-@vbl:   bit VBLINT
-        bpl @vbl
-        bit RSTVBL
-        dec NLEFT
-        bne @vbl
+        clc                     ; NEXT += n
+        lda NEXT
+        adc NLEFT
+        sta NEXT
+        bcc @vbl
+        inc NEXT+1
+@vbl:   jsr vbl_poll
+        sec                     ; until FRAMES - NEXT >= 0
+        lda FRAMES
+        sbc NEXT
+        sta NLEFT               ; (low byte of the difference)
+        lda FRAMES+1
+        sbc NEXT+1
+        bmi @vbl
+        ora NLEFT               ; late (FRAMES > NEXT)? count from now
+        beq @done
+        jmp timing_sync
 @done:  rts
 @slow:  jsr delay_tick
         lda ST_FAST
@@ -89,6 +111,29 @@ wait_ticks:
         jsr delay_tick
 :       dec NLEFT
         bne @slow
+        rts
+
+; vbl_poll: count a vertical blank into FRAMES if one has happened since the
+; last poll. Cheap; keeps A, X and Y. Does nothing in fallback mode.
+vbl_poll:
+        pha
+        lda ST_TIMING
+        beq @no
+        bit VBLINT
+        bpl @no
+        bit RSTVBL
+        inc FRAMES
+        bne @no
+        inc FRAMES+1
+@no:    pla
+        rts
+
+; timing_sync: the next wait's ticks count from now (after long set-up work).
+timing_sync:
+        lda FRAMES
+        sta NEXT
+        lda FRAMES+1
+        sta NEXT+1
         rts
 
 ; delay_tick: about 17,030 cycles including the JSR and RTS.

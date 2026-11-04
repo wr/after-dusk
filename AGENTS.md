@@ -64,7 +64,10 @@ Effect ids: 0 Flying Toasters, 1 Warp, 2 Starry Night, 3 Zot!, 4 Can of Worms, 5
 
 Each effect's step must finish inside its ticks on a 1 MHz IIc (`tests/fxcommon.py`
 checks the worst step against `ticks × 17,030 − 300` cycles and the median against 85% of
-that). When an effect can't keep up, it gets fewer objects, never a slower rate. Final counts:
+that). When an effect can't keep up, it gets fewer objects, never a slower rate. A step that can
+take longer than one frame must call `vbl_poll` during its work (the sprite engine does it for
+every sprite): the IIc's vertical-blank flag remembers only one blank, and `wait_ticks` counts
+frames to a deadline. `tests/mame/pacing.lua` checks every effect's real rate. Final counts:
 
 - Flying Toasters: 4 toasters and 3 slices of toast (7 toasters were planned).
 - Warp: 64 stars (70 were planned).

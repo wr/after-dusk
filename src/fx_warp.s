@@ -16,7 +16,7 @@
 .export fx_warp_init, fx_warp_step
 .export wrp_count, wrp_xf, wrp_xi, wrp_yf, wrp_yi
 
-.import rng_below, show_page1
+.import rng_below, show_page1, vbl_poll
 .import row_lo, row_hi, xbyte_lo, xbit_lo, xbyte_hi, xbit_hi
 .import sar4, shl4, shr4, sar5, shl3, shr5
 
@@ -180,7 +180,11 @@ fx_warp_step:
 
 @gone:  ldx I
         jsr respawn
-@next:  ldx I
+@next:  lda I                   ; halfway: count a blank if one has passed
+        cmp #NSTARS/2
+        bne :+
+        jsr vbl_poll
+:       ldx I
         dex
         bmi :+
         jmp @star

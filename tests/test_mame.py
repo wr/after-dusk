@@ -29,6 +29,10 @@ def test_timing(built):
     run_mame("timing.lua", 75)
 
 
+def test_pacing(built):
+    run_mame("pacing.lua", 400)
+
+
 @pytest.fixture(scope="session")
 def test_disk(built):
     """The disk with 2-second effects, for tests that need many effects."""

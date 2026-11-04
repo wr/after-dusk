@@ -13,6 +13,7 @@
 .export sprite_setup, sprite_draw, sprite_erase
 
 .import row_lo, row_hi, xbyte_lo, xmod_lo, xbyte_hi, xmod_hi
+.import vbl_poll
 
 LCBANK1 = $C08B         ; read twice: RAM bank 1, read and write
 
@@ -248,6 +249,7 @@ sprite_erase:
 sprite_draw:
         ldx #0
 sprite_go:
+        jsr vbl_poll            ; keep the frame count right during long steps
         stx SMODE
         sta SID
         tay

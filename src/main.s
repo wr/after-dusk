@@ -11,7 +11,7 @@
 .export start, restart, begin_effect, step_once, pick_next, normalize_display
 .export fx_table
 
-.import timing_init, wait_ticks, rng_seed, rng_below, key_pressed
+.import timing_init, wait_ticks, timing_sync, rng_seed, rng_below, key_pressed
 .import clear_page, copy_page, show_page1, wipe_to_black, plot
 .import sprite_setup
 .import fx_toasters_init, fx_toasters_step
@@ -88,13 +88,16 @@ begin_effect:
         adc FXOFF
         sta FXOFF
         tax
+        jsr timing_sync         ; ticks count from now, not from before
         lda fx_table+4,x
         beq :+
         jsr wipe_to_black
-:       stz TICKS
+:       ldx FXOFF
+        jsr @init
+        stz TICKS
         stz TICKS+1
-        ldx FXOFF
-        jmp (fx_table,x)        ; the effect's init returns to our caller
+        jmp timing_sync         ; and again after a long set-up
+@init:  jmp (fx_table,x)
 
 ; step_once: one step of the current effect, then wait out its ticks.
 ; Returns carry set when the effect should end (key, or time up).

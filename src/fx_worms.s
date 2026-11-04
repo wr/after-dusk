@@ -8,7 +8,7 @@
 .export fx_worms_init, fx_worms_step
 .export wrm_count, wrm_xi, wrm_xh, wrm_yi, wrm_head
 
-.import rng_next, rng_below
+.import rng_next, rng_below, vbl_poll
 .import row_lo, row_hi, xbyte_lo, xmod_lo, xbyte_hi, xmod_hi
 .import wvx_lo, wvx_hi, wvy_lo, wvy_hi
 
@@ -88,7 +88,8 @@ fx_worms_step:
         lda #PAGE1
         sta PAGE
         stz W
-@worm:  ldx W
+@worm:  jsr vbl_poll            ; steps can take more than a frame
+        ldx W
         lda W                   ; WB = W * 32
         asl a
         asl a

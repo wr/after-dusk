@@ -20,7 +20,7 @@
 .export fx_zot_init, fx_zot_step
 .export zot_seg, zot_nseg, zot_phase, zot_nbolt, zot_nflash, zot_nflick
 
-.import rng_next, rng_below, show_page1, show_page2, wait_ticks
+.import rng_next, rng_below, show_page1, show_page2, wait_ticks, vbl_poll
 .import row_lo, row_hi, xbyte_lo, xmod_lo, xbyte_hi, xmod_hi
 
 MAXSEG = 64
@@ -175,7 +175,8 @@ fx_zot_step:
 ; draw_bolt: invert every segment on page 1 (a second call undoes it all).
 draw_bolt:
         stz I
-@seg:   lda I
+@seg:   jsr vbl_poll            ; a bolt takes several frames to draw
+        lda I
         cmp zot_nseg
         bcs @done
         jsr seg_ptr
@@ -576,6 +577,7 @@ next_point:
 ; add_segment: (GX,GY)-(NX,NY) with flags GFLG, then GX/GY = NX/NY.
 ; Carry set if the list is full.
 add_segment:
+        jsr vbl_poll
         lda zot_nseg
         cmp #MAXSEG
         bcc :+
