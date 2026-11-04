@@ -5,9 +5,9 @@
 
 .include "config.inc"
 
-.export plot, line, disc, clear_page, fill_page, invert_page, copy_page
+.export plot, line, fline, disc, clear_page, fill_page, invert_page, copy_page
 .export show_page1, show_page2, wipe_to_black, hspan
-.import wait_ticks
+.import wait_ticks, vbl_poll
 .export row_lo, row_hi, xbyte_lo, xbit_lo, xbyte_hi, xbit_hi, xmod_lo, xmod_hi
 .export wvx_lo, wvx_hi, wvy_lo, wvy_hi, lsx, lsy, make_tables
 
@@ -23,6 +23,14 @@ ERR   = DSX+4         ; 2
 E2    = DSX+6         ; 2
 SX    = DSX+8         ; 1 or $FF
 SY    = DSX+9
+
+; fline
+FDX   = DSX           ; 2: dx, 0-279
+FDY   = DSX+2         ; |dy|
+FSY   = DSX+3         ; 1 or $FF: row direction
+FERR  = DSX+4         ; 2
+FCNT  = DSX+6         ; 2: dots left
+FPG   = DSX+8         ; $00 for page 1, $60 for page 2
 
 ; hspan
 HL    = DSX           ; 2: left end, clipped
@@ -214,6 +222,213 @@ line:
         dec PY+1
 :       dec PY
 @again: jmp @loop
+
+; ---------------------------------------------------------------- fline
+; Fast line for lines wholly on screen: (PX, PY) to (PX2, PY2), x 0-279 and
+; y 0-191 (not checked), both ends included, in mode PCOL (0 clear, 1 set).
+; Always drawn left to right, so a line and its reverse cover the same dots
+; (the two ends may be swapped on return). About 45 cycles a dot, plus 35
+; each time the row changes. Lines wider than they are tall count vertical
+; blanks as they go, so any length is safe; taller ones take under a frame.
+; The row being drawn is kept in X throughout.
+
+.macro PLOTOP mode
+  .if mode
+        lda (PTR),y
+        ora MASK
+  .else
+        lda MASK
+        eor #$7F
+        and (PTR),y
+  .endif
+        sta (PTR),y
+.endmacro
+
+.macro NEXTROW
+        txa
+        clc
+        adc FSY
+        tax
+        lda row_lo,x
+        sta PTR
+        lda row_hi,x
+        eor FPG
+        sta PTR+1
+.endmacro
+
+; wider than tall: a dot right every time, a row up or down when the error
+; says. wide = 1 for lines more than 255 dots across (16-bit error).
+.macro FLINE_X mode, wide
+        .local dot, step, right, done
+dot:    PLOTOP mode
+        dec FCNT
+        bne step
+        dec FCNT+1
+        beq done
+step:   asl MASK                ; one dot right
+        bpl right
+        lda #1
+        sta MASK
+        iny
+        jsr vbl_poll            ; a byte done: keep the frame count right
+right:
+  .if wide
+        sec                     ; err -= dy; below zero: err += dx, next row
+        lda FERR
+        sbc FDY
+        sta FERR
+        lda FERR+1
+        sbc #0
+        sta FERR+1
+        bpl dot
+        clc
+        lda FERR
+        adc FDX
+        sta FERR
+        lda FERR+1
+        adc FDX+1
+        sta FERR+1
+  .else
+        sec                     ; err -= dy; below zero (carry clear):
+        lda FERR                ; err += dx, next row
+        sbc FDY
+        sta FERR
+        bcs dot
+        adc FDX
+        sta FERR
+  .endif
+        NEXTROW
+        bra dot
+done:   rts
+.endmacro
+
+; taller than wide: a row every time, a dot right when the error says
+.macro FLINE_Y mode
+        .local dot, done
+dot:    PLOTOP mode
+        dec FCNT
+        beq done
+        NEXTROW
+        sec                     ; err -= dx; below zero (carry clear):
+        lda FERR                ; err += dy, one dot right
+        sbc FDX
+        sta FERR
+        bcs dot
+        adc FDY
+        sta FERR
+        asl MASK
+        bpl dot
+        lda #1
+        sta MASK
+        iny
+        bra dot
+done:   rts
+.endmacro
+
+fline:
+        lda PX2                 ; left to right: swap the ends if needed
+        cmp PX
+        lda PX2+1
+        sbc PX+1
+        bcs @ordered
+        lda PX
+        ldx PX2
+        sta PX2
+        stx PX
+        lda PX+1
+        ldx PX2+1
+        sta PX2+1
+        stx PX+1
+        lda PY
+        ldx PY2
+        sta PY2
+        stx PY
+@ordered:
+        sec                     ; FDX = PX2 - PX
+        lda PX2
+        sbc PX
+        sta FDX
+        lda PX2+1
+        sbc PX+1
+        sta FDX+1
+        ldx #1                  ; FDY = |PY2 - PY|, FSY = its direction
+        sec
+        lda PY2
+        sbc PY
+        bcs :+
+        eor #$FF
+        inc a
+        ldx #$FF
+:       sta FDY
+        stx FSY
+        lda PAGE
+        eor #$20
+        sta FPG
+        ldx PX                  ; the first dot: byte and mask...
+        lda PX+1
+        bne :+
+        lda xbit_lo,x
+        sta MASK
+        ldy xbyte_lo,x
+        bra :++
+:       lda xbit_hi,x
+        sta MASK
+        ldy xbyte_hi,x
+:       ldx PY                  ; ...and row
+        lda row_lo,x
+        sta PTR
+        lda row_hi,x
+        eor FPG
+        sta PTR+1
+        lda FDX+1               ; wider than tall, or taller?
+        bne @wide
+        lda FDX
+        cmp FDY
+        bcc @tall
+        inc a                   ; dx + 1 dots (1-256): FCNT, then one round
+        sta FCNT
+        lda #1
+        sta FCNT+1
+        lda FDX                 ; err = dx / 2
+        lsr a
+        sta FERR
+        lda PCOL
+        beq :+
+        jmp fline_xs
+:       jmp fline_xc
+@wide:  clc                     ; dx + 1 dots (257-280)
+        lda FDX
+        adc #1
+        sta FCNT
+        lda #2
+        sta FCNT+1
+        lda FDX+1               ; err = dx / 2
+        lsr a
+        sta FERR+1
+        lda FDX
+        ror a
+        sta FERR
+        lda PCOL
+        beq :+
+        jmp fline_xws
+:       jmp fline_xwc
+@tall:  lda FDY                 ; dy + 1 dots
+        inc a
+        sta FCNT
+        lda FDY                 ; err = dy / 2
+        lsr a
+        sta FERR
+        lda PCOL
+        beq :+
+        jmp fline_ys
+:       jmp fline_yc
+
+fline_xs:  FLINE_X 1, 0
+fline_xc:  FLINE_X 0, 0
+fline_xws: FLINE_X 1, 1
+fline_xwc: FLINE_X 0, 1
+fline_ys:  FLINE_Y 1
+fline_yc:  FLINE_Y 0
 
 ; ---------------------------------------------------------------- disc
 ; Filled disc centred on (PX, PY): every dot with dx*dx + dy*dy <= r*r + r,

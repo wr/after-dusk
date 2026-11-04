@@ -43,7 +43,7 @@ def test_fx_table(s):
     wipes = [s.peek(base + i * 6 + 4) for i in range(6)]
     ticks = [s.peek(base + i * 6 + 5) for i in range(6)]
     assert wipes == [1, 1, 1, 0, 0, 1]
-    assert ticks == [4, 2, 4, 3, 3, 2]
+    assert ticks == [4, 2, 4, 3, 3, 3]
 
 
 def test_normalize_display(s):

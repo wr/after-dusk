@@ -1,6 +1,8 @@
 import pytest
 
-from sim import PAGE, PAGE1, PAGE2, PCOL, PX2, PY2, RAD, Sim, row_base
+from sim import PAGE, PAGE1, PAGE2, PCOL, PX2, PY2, RAD, ST_TIMING, Sim, VblLatch, row_base
+
+FRAMES = 0x2C                   # timing.s: vertical blanks counted
 
 SET, CLEAR, INVERT = 1, 0, 2
 
@@ -166,3 +168,107 @@ def test_make_tables(s):
     }
     for base, values in want.items():
         assert list(s.mem.ram[base:base + 256]) == values, hex(base)
+
+
+# ---- fline: the fast line, for lines wholly on screen ----
+
+def fline(s, x0, y0, x1, y1, col=SET, page=PAGE1):
+    s.set_point(x0, y0)
+    s.set_point(x1, y1, PX2, PY2)
+    return s.call("fline", zp={PCOL: col, PAGE: page})
+
+
+FLINES = [
+    (0, 0, 279, 191), (279, 0, 0, 191), (0, 191, 279, 0), (10, 5, 10, 180), (10, 180, 10, 5),
+    (3, 100, 270, 100), (140, 96, 140, 96), (13, 10, 267, 182), (200, 50, 30, 120),
+    (50, 20, 60, 190), (277, 3, 279, 191), (0, 0, 255, 1), (0, 0, 256, 0), (6, 7, 8, 9),
+]
+
+
+def straight(dots, x0, y0, x1, y1):
+    """One dot per step along the longer axis, each within half a dot of the true line."""
+    dx, dy = x1 - x0, y1 - y0
+    assert len(dots) == max(abs(dx), abs(dy)) + 1
+    assert (x0, y0) in dots and (x1, y1) in dots
+    if abs(dx) >= abs(dy):
+        assert sorted(x for x, _ in dots) == list(range(min(x0, x1), max(x0, x1) + 1))
+        for x, y in dots:
+            assert abs(y - (y0 + dy * (x - x0) / dx if dx else y0)) <= 0.5
+    else:
+        assert sorted(y for _, y in dots) == list(range(min(y0, y1), max(y0, y1) + 1))
+        for x, y in dots:
+            assert abs(x - (x0 + dx * (y - y0) / dy)) <= 0.5
+
+
+@pytest.mark.parametrize("x0,y0,x1,y1", FLINES)
+def test_fline_draws_the_line(s, x0, y0, x1, y1):
+    fline(s, x0, y0, x1, y1)
+    straight(s.page_pixels(), x0, y0, x1, y1)
+
+
+def test_fline_random_lines(built):
+    import random
+    rnd = random.Random(7)
+    for _ in range(40):
+        s = Sim()
+        x0, x1 = rnd.randrange(280), rnd.randrange(280)
+        y0, y1 = rnd.randrange(192), rnd.randrange(192)
+        fline(s, x0, y0, x1, y1)
+        straight(s.page_pixels(), x0, y0, x1, y1)
+
+
+@pytest.mark.parametrize("x0,y0,x1,y1", FLINES)
+def test_fline_same_dots_both_ways(built, x0, y0, x1, y1):
+    a, b = Sim(), Sim()
+    fline(a, x0, y0, x1, y1)
+    fline(b, x1, y1, x0, y0)
+    assert a.page_pixels() == b.page_pixels()
+
+
+def test_fline_clear_takes_out_only_its_dots(built):
+    import random
+    rnd = random.Random(3)
+    blank = Sim()
+    fline(blank, 13, 10, 267, 182)
+    dots = blank.page_pixels()
+    s = Sim()
+    for a in range(0x2000, 0x4000):
+        s.poke(a, rnd.randrange(0x80))
+    before = s.page_pixels()
+    fline(s, 13, 10, 267, 182, SET)
+    assert s.page_pixels() == before | dots
+    fline(s, 267, 182, 13, 10, CLEAR)
+    assert s.page_pixels() == before - dots
+    assert all(b & 0x80 == 0 for b in s.page_bytes(PAGE1))
+
+
+def test_fline_page2(s):
+    fline(s, 0, 0, 279, 191, SET, PAGE2)
+    assert s.page_pixels(PAGE1) == set()
+    straight(s.page_pixels(PAGE2), 0, 0, 279, 191)
+
+
+@pytest.mark.parametrize("x0,y0,x1,y1", [(0, 0, 190, 191), (10, 5, 10, 180), (279, 0, 100, 191)])
+def test_fline_tall_lines_fit_in_a_frame(s, x0, y0, x1, y1):
+    """Lines taller than wide don't count vertical blanks, so they must take under a frame."""
+    assert fline(s, x0, y0, x1, y1) < 15_000
+
+
+def test_fline_wide_lines_are_quick(s):
+    assert fline(s, 30, 20, 250, 170) < 16_000          # the longest Lissajous lines
+    assert fline(s, 0, 96, 279, 96) < 17_000
+
+
+def test_fline_counts_blanks_on_long_lines(built):
+    """Lines wider than tall can take more than a frame; they count the blanks they cross."""
+    s = Sim()
+    VblLatch(s)
+    s.poke(ST_TIMING, 1)
+    s.poke16(FRAMES, 0)
+    first = s.mpu.processorCycles // 17030
+    for _ in range(4):
+        fline(s, 0, 0, 279, 191)
+        fline(s, 0, 191, 279, 0, CLEAR)
+    crossed = s.mpu.processorCycles // 17030 - first
+    assert crossed >= 5
+    assert crossed - 1 <= s.peek16(FRAMES) <= crossed

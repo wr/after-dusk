@@ -1,118 +1,131 @@
-; Effect 5: Lissajous. One line traces x = 140 + 127 sin(a t + phase),
-; y = 96 + 86 sin(b t), leaving a trail that is erased from its oldest end.
-; The phase drifts, so the figure slowly twists. After 900 steps the line
-; draws itself back in and a new figure starts. Drawn straight onto page 1.
+; Effect 5: Lissajous, after the original. Points jump about a quarter turn
+; at a time round a tilted ellipse, x = 140 + 127 sin(t), y = 96 + 86 sin(t +
+; phase), and each is joined to the last by a straight line. The last 100
+; lines stay on screen, so they make slowly turning near-squares round an
+; empty middle. The phase (the tilt) drifts, so the ellipse fattens, thins
+; and turns over; every 400 steps the jump is picked again, now and then a
+; third of a turn instead. Drawn straight onto page 1.
 
 .include "config.inc"
 
 .export fx_liss_init, fx_liss_step
-.export lis_a, lis_b, lis_n, lis_leaving, lis_count, lis_head, lis_t
+.export lis_th, lis_dth, lis_ph, lis_n, lis_count, lis_head
 
-.import rng_next, rng_below, line, show_page1, lsx, lsy
+.import rng_next, fline, show_page1, vbl_poll, lsx, lsy
 
-CAP   = 255                     ; points in the trail
+CAP     = 101                   ; points kept: 100 lines
+REPICK  = 400                   ; steps between new jumps
+PH_STEP = $1A                   ; tilt drift a step, 8.8 (0.0025 radians)
 
 ; ---- state in FXRAM ----
-lis_xl      = FXRAM             ; trail ring: x lo, x hi, y
-lis_xh      = lis_xl + 256
-lis_y       = lis_xh + 256
-lis_head    = lis_y + 256       ; newest point
-lis_count   = lis_head + 1      ; points in the trail
-lis_t       = lis_count + 1     ; 2: t, 8.8, 256 = a full turn
-lis_ph      = lis_t + 2         ; 2: phase, 8.8
-lis_a       = lis_ph + 2        ; the figure: a and b
-lis_b       = lis_a + 1
-lis_n       = lis_b + 1         ; 2: steps into this figure
-lis_leaving = lis_n + 2         ; 1 while the line draws itself back in
+lis_xl    = FXRAM               ; point ring: x lo, x hi, y
+lis_xh    = lis_xl + 256
+lis_y     = lis_xh + 256
+lis_head  = lis_y + 256         ; newest point
+lis_count = lis_head + 1        ; points kept
+lis_th    = lis_count + 1       ; 2: t, 8.8, 256 = a full turn
+lis_dth   = lis_th + 2          ; 2: the jump, 8.8
+lis_ph    = lis_dth + 2         ; 2: phase, 8.8
+lis_n     = lis_ph + 2          ; 2: steps since the jump was picked
 
 ; ---- zero page ----
-K    = FXZ
-P0   = FXZ+1                    ; 2: product scratch
-NX   = FXZ+3                    ; 2: the new point
-NY   = FXZ+5
+NX   = FXZ                      ; 2: the new point
+NY   = FXZ+2
 
 .segment "CODE"
-
-; figures (a, b)
-fig_a:  .byte 3, 5, 3, 1, 5, 2
-fig_b:  .byte 2, 4, 4, 2, 6, 3
 
 ; ================================================================ init
 fx_liss_init:
         jsr show_page1
-fresh:  lda #6                  ; a new figure
-        jsr rng_below
-        tax
-        lda fig_a,x
-        sta lis_a
-        lda fig_b,x
-        sta lis_b
-        stz lis_t
-        stz lis_t+1
-        stz lis_ph
-        jsr rng_next
-        sta lis_ph+1
         stz lis_count
         stz lis_head
+        stz lis_th
+        jsr rng_next            ; start anywhere round the ellipse
+        sta lis_th+1
+        stz lis_ph
+        lda #32                 ; tilt 45 degrees
+        sta lis_ph+1
         stz lis_n
         stz lis_n+1
-        stz lis_leaving
+        jmp quarter             ; the first jump is always about a quarter turn
+
+; pick: a new jump, about a quarter turn 7 times in 10, else about a third.
+pick:   jsr rng_next
+        cmp #179
+        bcc quarter
+        jsr rng_next            ; $5100-$57FF: 81-87 of 256
+        sta lis_dth
+        jsr rng_next
+        and #$07
+        cmp #7
+        bcc :+
+        lda #6
+:       clc
+        adc #$51
+        sta lis_dth+1
+        rts
+quarter:
+        jsr rng_next            ; $3D00-$44FF: 61-68 of 256
+        sta lis_dth
+        jsr rng_next
+        and #$07
+        clc
+        adc #$3D
+        sta lis_dth+1
         rts
 
 ; ================================================================ step
 fx_liss_step:
         lda #PAGE1
         sta PAGE
-        lda lis_leaving
-        beq @draw
-        lda #4                  ; drawing back in: 4 segments a step
-        sta K
-:       lda lis_count
-        cmp #2
-        bcc fresh               ; all gone: start a new figure
+        lda lis_count           ; full: the oldest line goes first, so the
+        cmp #CAP                ; newest is always drawn whole
+        bcc :+
         jsr erase_oldest
-        dec K
-        bne :-
-        rts
-
-@draw:  lda #2                  ; two new points a step
-        sta K
-@pt:    clc                     ; t += 1.0156 (0.025 radians)
-        lda lis_t
-        adc #$04
-        sta lis_t
-        lda lis_t+1
-        adc #$01
-        sta lis_t+1
-        clc                     ; phase += 0.0625 (0.0015 radians)
+        jsr vbl_poll            ; tall lines don't count blanks themselves
+:       clc                     ; t += jump
+        lda lis_th
+        adc lis_dth
+        sta lis_th
+        lda lis_th+1
+        adc lis_dth+1
+        sta lis_th+1
+        clc                     ; phase drifts
         lda lis_ph
-        adc #$10
+        adc #PH_STEP
         sta lis_ph
         bcc :+
         inc lis_ph+1
-:       lda lis_a               ; x = 140 + 127 sin(a t + phase)
-        jsr times_t
-        clc
-        lda P0
-        adc lis_ph
-        lda P0+1
-        adc lis_ph+1
-        tax
+:       inc lis_n               ; every 400 steps, a new jump
+        bne :+
+        inc lis_n+1
+:       lda lis_n
+        cmp #<REPICK
+        bne @point
+        lda lis_n+1
+        cmp #>REPICK
+        bne @point
+        stz lis_n
+        stz lis_n+1
+        jsr pick
+
+@point: ldx lis_th+1            ; x = 140 + 127 sin(t)
         lda lsx,x
         clc
         adc #140
         sta NX
-        lda lsx,x
-        bmi :+
         lda #0
-        adc #0
-        bra :++
-:       lda #$FF
-        adc #0
+        adc #0                  ; the carry is the high byte for sin >= 0;
+        ldy lsx,x               ; for sin < 0 the add always carries, and
+        bpl :+                  ; the high byte is 0
+        lda #0
 :       sta NX+1
-        lda lis_b               ; y = 96 + 86 sin(b t)
-        jsr times_t
-        ldx P0+1
+        clc                     ; y = 96 + 86 sin(t + phase)
+        lda lis_th
+        adc lis_ph
+        lda lis_th+1
+        adc lis_ph+1
+        tax
         lda lsy,x
         clc
         adc #96
@@ -137,8 +150,8 @@ fx_liss_step:
         stz PY2+1
         lda #1
         sta PCOL
-        jsr line
-@store: inc lis_head            ; add it to the trail
+        jsr fline
+@store: inc lis_head            ; keep it
         ldx lis_head
         lda NX
         sta lis_xl,x
@@ -147,29 +160,9 @@ fx_liss_step:
         lda NY
         sta lis_y,x
         inc lis_count
-        lda lis_count           ; full: the oldest segment goes
-        cmp #CAP
-        bcc :+
-        jsr erase_oldest
-:       dec K
-        beq :+
-        jmp @pt
+        rts
 
-:       inc lis_n               ; after 900 steps, draw back in
-        bne :+
-        inc lis_n+1
-:       lda lis_n+1
-        cmp #>900
-        bcc @done
-        lda lis_n
-        cmp #<900
-        bcc @done
-        lda #1
-        sta lis_leaving
-@done:  rts
-
-; erase_oldest: clear the segment between the two oldest points; the trail
-; loses a point.
+; erase_oldest: clear the line between the two oldest points; one point goes.
 erase_oldest:
         lda lis_head            ; oldest = head - count + 1
         sec
@@ -192,22 +185,6 @@ erase_oldest:
         sta PY2
         stz PY2+1
         stz PCOL
-        jsr line
+        jsr fline
         dec lis_count
-        rts
-
-; times_t: P0 = A * lis_t (16-bit, wrapping), A = 1-6
-times_t:
-        tax
-        stz P0
-        stz P0+1
-:       clc
-        lda P0
-        adc lis_t
-        sta P0
-        lda P0+1
-        adc lis_t+1
-        sta P0+1
-        dex
-        bne :-
         rts
