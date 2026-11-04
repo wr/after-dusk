@@ -8,7 +8,7 @@ local want = tonumber(os.getenv("AD_FX") or "0")
 local mon = T.mac.ioport.ports[":a2video:a2_video_config"].fields["Monitor type"]
 mon.user_value = 5
 T.run(function()
-  T.check(T.wait_until(T.running, 60 * 20), "After Dusk never started")
+  T.wait_started()
   for _ = 1, 60 do
     if T.peek(T.ST_FX) == want and T.peek16(T.TICKS) < 2000 then break end
     T.press(" ")

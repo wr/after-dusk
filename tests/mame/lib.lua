@@ -63,6 +63,12 @@ function T.hires_on()
   return (T.peek(0xC01D) & 0x80) ~= 0 and (T.peek(0xC01A) & 0x80) == 0
 end
 
+-- Wait for After Dusk to start: DOS loads the whole program from disk first,
+-- which takes a while (and longer when HELLO has to create the SEED file).
+function T.wait_started()
+  return T.check(T.wait_until(T.running, 60 * 60), "After Dusk never started")
+end
+
 -- True once After Dusk is running: its code is executing.
 function T.running()
   local pc = T.pc()

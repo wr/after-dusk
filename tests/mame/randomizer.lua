@@ -6,7 +6,7 @@ local function ticks() return T.peek16(T.TICKS) end
 local function changed_from(s) return function() return starts() ~= s end end
 
 T.run(function()
-  T.check(T.wait_until(T.running, 60 * 20), "After Dusk never started")
+  T.wait_started()
 
   -- 1. Left alone for 40 s: effects keep changing, never the same twice running.
   local s0, prev, last, repeats = starts(), starts(), T.peek(T.ST_FX), 0

@@ -1,7 +1,7 @@
 -- Ctrl-Reset in the middle of an effect restarts After Dusk in hi-res.
 local T = dofile("tests/mame/lib.lua")
 T.run(function()
-  T.check(T.wait_until(T.running, 60 * 20), "After Dusk never started")
+  T.wait_started()
   T.wait_frames(120)
   T.mac:soft_reset()
   T.wait_frames(2)

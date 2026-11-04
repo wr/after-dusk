@@ -4,7 +4,7 @@
 -- run would be simpler, but MAME rebuilds the machine and crashes the script.)
 local T = dofile("tests/mame/lib.lua")
 T.run(function()
-  T.check(T.wait_until(T.running, 60 * 20), "After Dusk never started")
+  T.wait_started()
   T.info("seed=" .. T.peek16(T.SEED))
   if not T.failed then T.pass("seed") end
 end)

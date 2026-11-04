@@ -2,7 +2,7 @@
 -- over 600 frames an effect takes 600 / ticks_per_step steps.
 local T = dofile("tests/mame/lib.lua")
 T.run(function()
-  T.check(T.wait_until(T.running, 60 * 20), "After Dusk never started")
+  T.wait_started()
   T.wait_frames(60)
   T.check(T.peek(T.ST_TIMING) == 1, "vertical-blank pacing not detected (fell back to delays)")
   local st, b1 = T.peek(T.ST_STARTS), T.peek16(T.ST_BEAT)
