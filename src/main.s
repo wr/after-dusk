@@ -13,12 +13,13 @@
 
 .import timing_init, wait_ticks, timing_sync, rng_seed, rng_below, key_pressed
 .import clear_page, copy_page, show_page1, wipe_to_black, plot
-.import sprite_setup
+.import sprite_setup, make_tables
 .import fx_toasters_init, fx_toasters_step
 .import fx_warp_init, fx_warp_step
 .import fx_starry_init, fx_starry_step
 .import fx_zot_init, fx_zot_step
 .import fx_worms_init, fx_worms_step
+.import fx_liss_init, fx_liss_step
 
 FXOFF   = CORE+6        ; current effect's offset into fx_table (id * 6)
 
@@ -67,6 +68,7 @@ setup:
         jsr clear_page
         jsr timing_init         ; reads the ROM: before the language card
         jsr sprite_setup        ; language card RAM in from here on
+        jsr make_tables
         lda #<restart           ; Ctrl-Reset comes back to us
         sta SOFTEV
         lda #>restart
@@ -151,32 +153,5 @@ fx_table:
         .byte 0, 3              ; 3 Zot!
         .word fx_worms_init, fx_worms_step
         .byte 0, 3              ; 4 Can of Worms
-        .word ph_init, ph_step
+        .word fx_liss_init, fx_liss_step
         .byte 1, 2              ; 5 Lissajous
-
-; ---------------------------------------------------------------- placeholder
-; Stands in for an effect until it is written: one dot, placed by id.
-ph_init:
-        lda #1
-        bra ph_dot
-ph_step:
-        lda #2
-ph_dot: sta PCOL
-        lda #PAGE1
-        sta PAGE
-        lda ST_FX
-        asl a                   ; x = id * 40 + 20
-        asl a
-        asl a
-        sta PX
-        asl a
-        asl a
-        clc
-        adc PX
-        adc #20
-        sta PX
-        stz PX+1
-        lda #96
-        sta PY
-        stz PY+1
-        jmp plot

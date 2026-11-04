@@ -98,9 +98,9 @@ def test_overlap_outline(s):
 
 def test_vectors_kept(s):
     assert bytes(s.mem.ram[0xFFFA:0x10000]) == VECTORS
-    assert LC_END <= 0xFFF0
+    assert LC_END <= 0xF000          # below the start-up tables
 
 
 def test_fits():
     print(f"pre-shifted sprites: ${0xD000:04X}-${LC_END - 1:04X} ({LC_END - 0xD000} bytes)")
-    assert LC_END <= 0xFFF0
+    assert LC_END <= 0xF000          # below the start-up tables

@@ -24,7 +24,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 WING_ANGLES = (-108, -62, -14)      # sprite ids 0, 1, 2: wing up, middle, down
 LC_START = 0xD000
-LC_LIMIT = 0xFFF0                   # keep clear of the vectors at $FFFA
+LC_LIMIT = 0xF000                   # Warp's tables start here (src/config.inc)
 
 
 def build_sprite(w, h, inside, shade, extra=None):

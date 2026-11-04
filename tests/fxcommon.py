@@ -27,6 +27,7 @@ def start(fx, seed=0x4D2A, prepare=None):
     s.poke(ST_TIMING, 0)
     s.mem.ram[0xFFFA:0x10000] = bytes(6)
     s.call("sprite_setup", max_cycles=3_000_000)
+    s.call("make_tables", max_cycles=200_000)
     s.poke16(0x20, seed)
     s.poke(ST_FX, fx)
     init, step, wipe, _ = fx_entry(s, fx)

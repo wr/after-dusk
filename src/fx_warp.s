@@ -18,7 +18,6 @@
 
 .import rng_below, show_page1, vbl_poll
 .import row_lo, row_hi, xbyte_lo, xbit_lo, xbyte_hi, xbit_hi
-.import sar4, shl4, shr4, sar5, shl3, shr5
 
 ; 70 stars were planned; 64 keep every step inside 2 ticks (measured).
 NSTARS = 64

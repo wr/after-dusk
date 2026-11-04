@@ -149,3 +149,20 @@ def test_hspan_off_screen(s):
         s.set_point(x1, y, PX2, PY2)
         s.call("hspan", zp={PCOL: SET, PAGE: PAGE1})
     assert s.page_pixels() == set()
+
+
+def test_make_tables(s):
+    s.call("make_tables", max_cycles=200_000)
+
+    def sar(h, n):
+        return ((h - 256 if h & 0x80 else h) >> n) & 0xFF
+    want = {
+        0xF000: [sar(h, 4) for h in range(256)],
+        0xF100: [(h << 4) & 0xF0 for h in range(256)],
+        0xF200: [h >> 4 for h in range(256)],
+        0xF300: [sar(h, 5) for h in range(256)],
+        0xF400: [(h << 3) & 0xF8 for h in range(256)],
+        0xF500: [h >> 5 for h in range(256)],
+    }
+    for base, values in want.items():
+        assert list(s.mem.ram[base:base + 256]) == values, hex(base)

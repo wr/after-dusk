@@ -9,7 +9,7 @@
 .export show_page1, show_page2, wipe_to_black, hspan
 .import wait_ticks
 .export row_lo, row_hi, xbyte_lo, xbit_lo, xbyte_hi, xbit_hi, xmod_lo, xmod_hi
-.export sar4, shl4, shr4, sar5, shl3, shr5, wvx_lo, wvx_hi, wvy_lo, wvy_hi
+.export wvx_lo, wvx_hi, wvy_lo, wvy_hi, lsx, lsy, make_tables
 
 ; scratch
 PTR   = DSCR          ; 2 bytes: row pointer
@@ -504,4 +504,41 @@ show_page2:
         rts
 
 ; ---------------------------------------------------------------- tables
+; make_tables: build Warp's shift tables in the language card (call after
+; sprite_setup has switched its RAM in). For a signed 8.8 value hi:lo,
+;   (hi:lo) >> n = sarN[hi] : (shlM[hi] | shrN[lo]), M = 8 - n.
+make_tables:
+        ldx #0
+@l:     txa                     ; sar4/sar5: arithmetic shifts of x
+        cmp #$80
+        ror a
+        cmp #$80
+        ror a
+        cmp #$80
+        ror a
+        cmp #$80
+        ror a
+        sta sar4,x
+        cmp #$80
+        ror a
+        sta sar5,x
+        txa                     ; shl4, shl3
+        asl a
+        asl a
+        asl a
+        sta shl3,x
+        asl a
+        sta shl4,x
+        txa                     ; shr4, shr5
+        lsr a
+        lsr a
+        lsr a
+        lsr a
+        sta shr4,x
+        lsr a
+        sta shr5,x
+        inx
+        bne @l
+        rts
+
 .include "tables.inc"

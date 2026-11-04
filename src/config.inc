@@ -52,6 +52,14 @@ ST_FAST   = $0315             ; 1 = IIc Plus (4 MHz) detected
 FXRAM     = $0800             ; $0800-$1FFF
 FXRAM_END = $2000
 
+; ---- tables built at start-up in the language card (after the sprites) ----
+sar4    = $F000
+shl4    = $F100
+shr4    = $F200
+sar5    = $F300
+shl3    = $F400
+shr5    = $F500
+
 ; ---- hi-res pages ----
 PAGE1   = $20
 PAGE2   = $40
