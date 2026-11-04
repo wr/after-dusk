@@ -13,6 +13,7 @@
 
 .import timing_init, wait_ticks, rng_seed, rng_below, key_pressed
 .import clear_page, copy_page, show_page1, wipe_to_black, plot
+.import sprite_setup
 
 FXOFF   = CORE+6        ; current effect's offset into fx_table (id * 6)
 
@@ -59,7 +60,8 @@ setup:
         lda #PAGE2
         sta PAGE
         jsr clear_page
-        jsr timing_init
+        jsr timing_init         ; reads the ROM: before the language card
+        jsr sprite_setup        ; language card RAM in from here on
         lda #<restart           ; Ctrl-Reset comes back to us
         sta SOFTEV
         lda #>restart

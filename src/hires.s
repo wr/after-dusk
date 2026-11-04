@@ -8,7 +8,7 @@
 .export plot, line, disc, clear_page, fill_page, invert_page, copy_page
 .export show_page1, show_page2, wipe_to_black
 .import wait_ticks
-.export row_lo, row_hi, xbyte_lo, xbit_lo, xbyte_hi, xbit_hi
+.export row_lo, row_hi, xbyte_lo, xbit_lo, xbyte_hi, xbit_hi, xmod_lo, xmod_hi
 
 ; scratch
 PTR   = DSCR          ; 2 bytes: row pointer
