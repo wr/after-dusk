@@ -62,7 +62,7 @@ def test_draw_clips(s, sid, x, y):
     s.fill_page(PAGE1, 0)
     s.start_tracking()
     draw(s, sid, x, y)
-    assert s.writes_outside((0x2000, 0x4000), (0x30, 0x40), (0x10, 0x20), (0x100, 0x200)) == []
+    assert s.writes_outside((0x2000, 0x4000), (0x30, 0x40), (0x90, 0xA0), (0x10, 0x20), (0x100, 0x200)) == []
     assert s.page_pixels() == expected(sid, x, y)
 
 

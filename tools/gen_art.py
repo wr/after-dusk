@@ -7,6 +7,10 @@ cell (40x40 for the toaster, 16x15 for the toast) with pixel values
 0 = see-through, 1 = lit, 2 = dark; its mask is every non-see-through pixel
 grown by one dot in all 8 directions, which gives every sprite a dark outline.
 
+art.inc also holds, per sprite and shift, each row's span: the first and
+one-past-last byte that holds any mask dot, as offsets into the block (H
+starts, then H ends), so drawing skips the empty corners.
+
 art.inc holds, per sprite, the unshifted pixels and mask trimmed to the
 mask's bounding box, in hi-res byte format (7 dots per byte, bit 0 leftmost,
 bit 7 = 0), with BPR bytes per row: enough for any of the 7 shifts. The
@@ -141,6 +145,20 @@ class Sprite:
         self.lit = {(x, y) for y, row in enumerate(pix) for x, v in enumerate(row) if v == 1}
         self.mask = set(cells)
 
+    def spans(self, shift):
+        """Per row, the first and one-past-last byte holding any mask dot, as
+        offsets from the start of the block (row * bpr + byte)."""
+        assert self.bpr * self.h <= 256, "a block must be indexable by Y"
+        starts, ends = [], []
+        m = self.rows(self.mask, shift)
+        for r in range(self.h):
+            row = m[r * self.bpr:(r + 1) * self.bpr]
+            nz = [j for j, b in enumerate(row) if b]
+            assert nz, "every row of a trimmed sprite holds some mask"
+            starts.append(r * self.bpr + nz[0])
+            ends.append(r * self.bpr + nz[-1] + 1)
+        return starts, ends
+
     def rows(self, dots, shift=0):
         """Packed hi-res bytes, BPR per row, for a set of cell dots at a shift."""
         out = []
@@ -198,6 +216,14 @@ def write_inc(sps):
         "spr_src_hi:",
         "        .byte " + ", ".join(f">spr_src{i}" for i in range(len(sps))),
     ]
+    spans = [(i, k) for i in range(len(sps)) for k in range(7)]
+    parts.append("spr_spn_lo:")
+    parts.append("        .byte " + ", ".join(f"<spr_spn{i}_{k}" for i, k in spans))
+    parts.append("spr_spn_hi:")
+    parts.append("        .byte " + ", ".join(f">spr_spn{i}_{k}" for i, k in spans))
+    for i, k in spans:
+        st, en = sps[i].spans(k)
+        parts.append(table(f"spr_spn{i}_{k}", st + en))
     for i, s in enumerate(sps):
         parts.append(f"; sprite {i}: {s.w}x{s.h} dots at ({s.x0},{s.y0}) in its cell, {s.bpr} bytes per row")
         parts.append(table(f"spr_src{i}", s.rows(s.lit) + s.rows(s.mask)))

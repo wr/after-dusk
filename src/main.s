@@ -14,6 +14,7 @@
 .import timing_init, wait_ticks, rng_seed, rng_below, key_pressed
 .import clear_page, copy_page, show_page1, wipe_to_black, plot
 .import sprite_setup
+.import fx_toasters_init, fx_toasters_step
 
 FXOFF   = CORE+6        ; current effect's offset into fx_table (id * 6)
 
@@ -133,7 +134,7 @@ normalize_display:
 ; ---------------------------------------------------------------- table
 ; Per effect: init, step, wipe first (1/0), ticks per step.
 fx_table:
-        .word ph_init, ph_step
+        .word fx_toasters_init, fx_toasters_step
         .byte 1, 4              ; 0 Flying Toasters
         .word ph_init, ph_step
         .byte 1, 2              ; 1 Warp

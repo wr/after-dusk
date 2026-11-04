@@ -20,7 +20,6 @@ LCBANK1 = $C08B         ; read twice: RAM bank 1, read and write
 SCR   = SPZ             ; 2: screen row pointer
 PIXP  = SPZ+2           ; 2: pixel rows
 MSKP  = SPZ+4           ; 2: AND-mask rows
-SYY   = SPZ+6           ; 2: y of the current row, signed
 SH    = SPZ+8           ; rows left
 SBPR  = SPZ+9           ; bytes per row
 JS    = SPZ+10          ; first byte to draw in a row
@@ -29,6 +28,18 @@ SCOL  = SPZ+12          ; screen byte column of the row's byte 0, signed
 SID   = SPZ+13
 SMODE = SPZ+14          ; 0 draw, 1 erase
 SK    = SPZ+15          ; shift 0-6
+SSP   = SPX             ; 2: span starts for this sprite and shift
+SEP   = SPX+2           ; 2: span ends
+YROW  = SPX+4           ; screen row being drawn
+RIX   = SPX+5           ; sprite row being drawn
+T0    = SPX+6           ; this row's first byte
+T1    = SPX+7           ; one past its last
+PAGEX = SPX+8           ; PAGE eor $20: $00 page 1, $60 page 2
+SCOLH = SPX+9           ; $FF when SCOL is negative, else 0
+OFFL  = SPX+10          ; 2: col - row * bpr
+OFFH  = SPX+11
+RBJS  = SPX+12          ; side clip limits as block offsets
+RBJE  = SPX+13
 
 ; setup (same zero page, never at the same time as drawing)
 SRCP  = SPZ             ; 2
@@ -225,8 +236,12 @@ shift_block:
         rts
 
 ; ---------------------------------------------------------------- draw
-; sprite_draw / sprite_erase: A = sprite id, PX/PY = top-left of its cell
-; (signed), PAGE. Clipped at all four edges.
+; sprite_draw: A = sprite id, PX/PY = top-left of its cell (signed), PAGE.
+; Masked: screen AND mask OR pixels. Clipped at all four edges.
+; sprite_erase: the same parameters; clears to black every byte of each row
+; that holds any of the sprite's mask. (Only for sprites on a black
+; background: neighbouring dots in those bytes are cleared too.)
+; Both draw only each row's span, so the empty corners cost nothing.
 sprite_erase:
         ldx #1
         bra sprite_go
@@ -262,7 +277,7 @@ sprite_go:
         sta SCOL
         lda xmod_hi,x
         bra @shift
-@out:   rts                     ; (a near target for the early exits)
+@out:   rts
 @xlo:   ldx SCR
         lda xbyte_lo,x
         sec
@@ -287,18 +302,31 @@ sprite_go:
         sta MSKP
         lda spr_msk_hi,x
         sta MSKP+1
-        lda spr_bpr,y
-        sta SBPR
+        lda spr_spn_lo,x        ; span starts, then ends H bytes later
+        sta SSP
+        lda spr_spn_hi,x
+        sta SSP+1
         lda spr_h,y
         sta SH
+        clc
+        adc SSP
+        sta SEP
+        lda SSP+1
+        adc #0
+        sta SEP+1
+        lda spr_bpr,y
+        sta SBPR
 
-        lda SCOL                ; JS = max(0, -col)
+        lda SCOL                ; JS = max(0, -col), SCOLH = sign of col
         bpl :+
         eor #$FF
         inc a
+        sta JS
+        lda #$FF
         bra :++
-:       lda #0
-:       sta JS
+:       stz JS
+        lda #0
+:       sta SCOLH
         lda #40                 ; JE = min(bpr, 40 - col)
         sec
         sbc SCOL
@@ -310,73 +338,199 @@ sprite_go:
 :       sta JE
         lda JS
         cmp JE
-        bcs @off
+        bcs @out
+        lda PAGE
+        eor #$20
+        sta PAGEX
 
-        clc                     ; SYY = y of the trimmed box
+        lda SCOL                ; OFF = col - RIX * bpr: screen pointers are
+        sta OFFL                ; offset so one Y indexes data and screen
+        lda SCOLH
+        sta OFFH
+        lda JS                  ; RBJS/RBJE: the clip limits as block offsets
+        sta RBJS
+        lda JE
+        sta RBJE
+        stz RIX                 ; first row of the sprite to draw
+        clc                     ; YROW = y of the trimmed box
         lda PY
         adc spr_y0,y
-        sta SYY
+        sta YROW
         lda PY+1
         adc #0
-        sta SYY+1
+        bmi @above
+        bne @out2               ; y >= 256
+        lda YROW
+        cmp #192
+        bcs @out2
+        bra @rows
+@out2:  rts
+@above: lda YROW                ; y < 0: skip -y rows
+        eor #$FF
+        inc a
+        cmp SH
+        bcs @out2               ; entirely above the top
+        tax                     ; step past them: RIX counts up from 0 and
+:       jsr next_row_offsets    ; YROW from the negative y to 0
+        dex
+        bne :-
 
-@row:   lda SYY+1
-        bmi @next               ; above the top: skip the row
-        bne @off                ; below the bottom: done
-        ldx SYY
-        cpx #192
-        bcs @off
-        lda PAGE                ; SCR = row start + col (col may be negative)
-        eor #$20
-        eor row_hi,x
-        sta SCR+1
-        lda row_lo,x
-        clc
-        adc SCOL
-        sta SCR
-        lda SCOL
-        bmi :+
-        bcc @go
-        inc SCR+1
-        bra @go
-:       bcs @go
-        dec SCR+1
-@go:    ldy JS
+@rows:  lda #192                ; rows to draw: min(H - RIX, 192 - YROW)
+        sec
+        sbc YROW
+        sta T1
+        lda SH
+        sec
+        sbc RIX
+        cmp T1
+        bcc :+
+        lda T1
+:       sta SH
+        lda JS                  ; no clipping at the sides: the fast loops
+        bne @toclip
+        lda JE
+        cmp SBPR
+        bne @toclip
         lda SMODE
-        bne @erase
-@d:     lda (SCR),y
+        bne @toerase
+        bra @fdraw0
+@toclip: jmp @clip
+@toerase: ldx YROW
+        jmp @ferase
+@fdraw0:
+
+; The fast loops are written out in full: this is where the time goes.
+        ldx YROW                ; X stays the screen row
+@fdraw: lda row_lo,x
+        clc
+        adc OFFL
+        sta SCR
+        lda row_hi,x
+        eor PAGEX
+        adc OFFH
+        sta SCR+1
+        ldy RIX                 ; this row's span
+        lda (SEP),y
+        sta T1
+        lda (SSP),y
+        tay
+:       lda (SCR),y
         and (MSKP),y
         ora (PIXP),y
         sta (SCR),y
         iny
-        cpy JE
-        bne @d
-        bra @next
-@erase: lda (SCR),y
+        cpy T1
+        bne :-
+        sec                     ; next row
+        lda OFFL
+        sbc SBPR
+        sta OFFL
+        bcs :+
+        dec OFFH
+:       inx
+        inc RIX
+        dec SH
+        bne @fdraw
+        rts
+
+@ferase: lda row_lo,x
+        clc
+        adc OFFL
+        sta SCR
+        lda row_hi,x
+        eor PAGEX
+        adc OFFH
+        sta SCR+1
+        ldy RIX
+        lda (SEP),y
+        sta T1
+        lda (SSP),y
+        tay
+        lda #0
+:       sta (SCR),y
+        iny
+        cpy T1
+        bne :-
+        sec
+        lda OFFL
+        sbc SBPR
+        sta OFFL
+        bcs :+
+        dec OFFH
+:       inx
+        inc RIX
+        dec SH
+        bne @ferase
+        rts
+
+@clip:  ldy RIX                 ; this row's span, clipped to the sides
+        lda (SSP),y
+        cmp RBJS
+        bcs :+
+        lda RBJS
+:       sta T0
+        lda (SEP),y
+        cmp RBJE
+        bcc :+
+        lda RBJE
+:       sta T1
+        lda T0
+        cmp T1
+        bcs @cnext              ; nothing left in this row
+        jsr row_pointer
+        ldy T0
+        lda SMODE
+        bne @cer
+:       lda (SCR),y
         and (MSKP),y
+        ora (PIXP),y
         sta (SCR),y
         iny
-        cpy JE
-        bne @erase
+        cpy T1
+        bne :-
+        bra @cnext
+@cer:   lda #0
+:       sta (SCR),y
+        iny
+        cpy T1
+        bne :-
+@cnext: jsr next_row_offsets
+        dec SH
+        bne @clip
+        rts
 
-@next:  clc
-        lda PIXP
-        adc SBPR
-        sta PIXP
-        bcc :+
-        inc PIXP+1
+; SCR = start of screen row YROW + OFF
+row_pointer:
+        ldx YROW
+        lda row_lo,x
+        clc
+        adc OFFL
+        sta SCR
+        lda row_hi,x
+        eor PAGEX
+        adc OFFH
+        sta SCR+1
+        rts
+
+; step to the next sprite row and screen row. Keeps X.
+next_row_offsets:
+        sec
+        lda OFFL
+        sbc SBPR
+        sta OFFL
+        bcs :+
+        dec OFFH
 :       clc
-        lda MSKP
+        lda RBJS
         adc SBPR
-        sta MSKP
-        bcc :+
-        inc MSKP+1
-:       inc SYY
-        bne :+
-        inc SYY+1
-:       dec SH
-        bne @row
-@off:   rts
+        sta RBJS
+        clc
+        lda RBJE
+        adc SBPR
+        sta RBJE
+        inc YROW
+        inc RIX
+        rts
 
 vecsave:
         .res 6

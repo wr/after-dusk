@@ -62,6 +62,12 @@ Status block: `$0310` current effect (0–5, `$FF` before the first), `$0311` ef
 
 Effect ids: 0 Flying Toasters, 1 Warp, 2 Starry Night, 3 Zot!, 4 Can of Worms, 5 Lissajous.
 
+Each effect's step must finish inside its ticks on a 1 MHz IIc (`tests/fxcommon.py`
+checks the worst step against `ticks × 17,030 − 300` cycles and the median against 85% of
+that). When an effect can't keep up, it gets fewer objects, never a slower rate. Final counts:
+
+- Flying Toasters: 4 toasters and 3 slices of toast (7 toasters were planned).
+
 ## Never
 
 - Never read or write `$C030`–`$C03F`. After Dusk is silent.

@@ -34,6 +34,9 @@ FXZ     = $40
 ; upper zero page is ours.
 DSX     = $80
 
+; ---- zero page: extra sprite-engine scratch ($90-$9F, sprite.s) ----
+SPX     = $90
+
 ; ---- seed POKEd by HELLO ----
 SEED_LO = $0300
 SEED_HI = $0301
