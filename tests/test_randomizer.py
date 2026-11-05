@@ -119,7 +119,9 @@ def test_fallback_pacing(built, fx):
     s = fx_start(fx)
     s.poke(0x2B, fx * 6)                  # FXOFF: the randomizer's current effect
     ticks = fx_entry(s, fx)[3]
-    for _ in range(40):                   # settle (worms only eat once their tails start)
+    # settle: worms only eat once their tails start; String Theory's ribbons
+    # only start rubbing out once they hold 56 strings
+    for _ in range(70 if fx == 7 else 40):
         s.step()
     periods = []
     for _ in range(24):
