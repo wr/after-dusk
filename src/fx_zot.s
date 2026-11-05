@@ -2,8 +2,9 @@
 ;
 ; A bolt is a jagged trunk from the top of the screen, two dots wide, with
 ; branches up to two levels deep. It is drawn by inverting dots, so drawing
-; it a second time puts the screen back exactly. Each bolt holds a few
-; steps; some flicker off and on once; one in four flashes the whole screen.
+; it a second time puts the screen back exactly. As in the original, a bolt
+; strikes every 2.5-4 seconds and holds 14-24 steps (about a second); some
+; flicker off and on once; one in four flashes the whole screen.
 ;
 ; Segments are drawn row by row from just below their start: each row
 ; inverts the run of dots from the previous row's x to this row's, so every
@@ -136,11 +137,11 @@ fx_zot_step:
         lda #2
         sta zot_hold
         rts
-:       stz zot_phase           ; done; pause 4-30 steps
-        lda #27
+:       stz zot_phase           ; done; pause 50-85 steps
+        lda #36
         jsr rng_below
         clc
-        adc #4
+        adc #50
         sta zot_wait
         rts
 
@@ -155,10 +156,10 @@ fx_zot_step:
         inc zot_nbolt
         lda #1
         sta zot_phase
-        lda #3                  ; hold 2-4 steps
+        lda #11                 ; hold 14-24 steps
         jsr rng_below
         clc
-        adc #2
+        adc #14
         sta zot_hold
         stz zot_flick           ; 40% flicker
         jsr rng_next

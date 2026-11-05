@@ -6,6 +6,9 @@ from fxcommon import ALLOWED, TICK, check_bit7, check_in_bounds, start
 from sim import PAGE1, ST_TIMING, VblLatch
 
 FX = 3
+HOLD = range(14, 25)            # steps a bolt stays up: about a second at 20 steps a second
+PAUSE = range(50, 86)           # steps from one bolt going to the next: 2.5-4.3 seconds
+SEEDS = (0x4D2A, 0x1357, 0xBEEF)
 
 
 def pattern(s):
@@ -24,6 +27,19 @@ def segments(s):
         x1 = s.peek(a + 3) | (s.peek(a + 4) << 8)
         out.append((x0, s.peek(a + 2), x1, s.peek(a + 5), s.peek(a + 6)))
     return out
+
+
+def timeline(s, n):
+    """After each of n steps: the phase, and how many bolts have struck."""
+    out = []
+    for _ in range(n):
+        s.step()
+        out.append((s.peek(s.addr("zot_phase")), s.peek(s.addr("zot_nbolt"))))
+    return out
+
+
+def strikes(tl):
+    return [i for i in range(1, len(tl)) if tl[i][1] != tl[i - 1][1]]
 
 
 @pytest.fixture
@@ -59,15 +75,44 @@ def test_keeps_the_screen(built):
 def test_restores(s):
     original = s.page_bytes(PAGE1)
     bolts = 0
-    for _ in range(1500):
+    for _ in range(3000):                            # about 34 bolts, 2.5 minutes
         s.step()
         if s.peek(s.addr("zot_phase")) == 0:
             assert s.page_bytes(PAGE1) == original
             assert s.peek(0x24) == 0                 # page 1 showing
         bolts = s.peek(s.addr("zot_nbolt"))
-    assert bolts >= 10
+    assert bolts >= 25
     assert s.peek(s.addr("zot_nflash")) >= 1
     assert s.peek(s.addr("zot_nflick")) >= 1
+
+
+def test_a_bolt_stays_up_about_a_second(built):
+    holds = []
+    for seed in SEEDS:
+        tl = timeline(start(FX, seed=seed), 1200)
+        for i in strikes(tl):
+            gone = next((j for j in range(i + 1, len(tl)) if tl[j][0] != 1), None)
+            if gone:
+                holds.append(gone - i)
+    print("holds", sorted(holds))
+    assert len(holds) >= 20
+    assert all(h in HOLD for h in holds)
+    assert min(holds) <= 16 and max(holds) >= 22         # spread over the whole range
+
+
+def test_a_bolt_every_few_seconds(built):
+    pauses = []
+    for seed in SEEDS:
+        tl = timeline(start(FX, seed=seed), 1500)
+        for e in range(1, len(tl)):
+            if tl[e][0] == 0 and tl[e - 1][0] != 0:     # the bolt has gone for good
+                nxt = next((i for i in strikes(tl) if i > e), None)
+                if nxt:
+                    pauses.append(nxt - e)
+    print("pauses", sorted(pauses))
+    assert len(pauses) >= 30
+    assert all(p in PAUSE for p in pauses)
+    assert min(pauses) <= 55 and max(pauses) >= 80
 
 
 def test_trunk(s):
@@ -99,7 +144,7 @@ def test_flash_is_a_whole_frame(built):
     s.mem.write_hooks[0xC055] = lambda v: events.append(("page2", s.mpu.processorCycles))
     s.mem.write_hooks[0xC054] = lambda v: events.append(("page1", s.mpu.processorCycles))
     flashes = 0
-    for _ in range(600):
+    for _ in range(2000):
         before = s.peek(s.addr("zot_nflash"))
         events.clear()
         s.step()
