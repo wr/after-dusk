@@ -65,9 +65,9 @@ T.run(function()
   local skips = (starts() - s3) % 256
   T.info("skips after a burst of 5 keys: " .. skips)
   T.check(skips >= 1 and skips <= 6, "burst caused " .. skips .. " effect changes")
-  local b = T.peek16(T.ST_BEAT)
-  T.wait_frames(30)
-  T.check(T.peek16(T.ST_BEAT) ~= b, "stopped running after the burst")
+  local b = T.peek16(T.ST_BEAT)                -- (Starry Night's init alone takes ~70 frames)
+  T.check(T.wait_until(function() return T.peek16(T.ST_BEAT) ~= b end, 120),
+          "stopped running after the burst")
 
   if not T.failed then T.pass("randomizer") end
 end)
