@@ -4,7 +4,7 @@
 -- seconds apart into build/mame/snap/ as fx<id>-<n>.png.
 local T = dofile("tests/mame/lib.lua")
 local want = tonumber(os.getenv("AD_FX") or "0")
--- Wells's IIc has a green monochrome monitor.
+-- Shown on a green monochrome monitor, as on a IIc's own.
 local mon = T.mac.ioport.ports[":a2video:a2_video_config"].fields["Monitor type"]
 mon.user_value = 5
 T.run(function()
