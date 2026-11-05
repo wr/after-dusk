@@ -1,12 +1,15 @@
 ; Effect 7: String Theory, after the original. Two ribbons of straight
 ; strings, each string joining two points on the screen's edge roughly across
 ; the screen from each other. A ribbon has a position s on the edge (940 dots
-; round, clockwise from the top-left corner), a speed v (1.2-2.4 dots a step,
-; drifting) and a phase ph that turns 0.008-0.014 radians a step, a pace and
-; a way round of the ribbon's own: its newest string runs from s to
-; s + 940 (0.5 + 0.3 sin ph). With s moving on more than a dot a step, strings
-; lie far enough apart to show one by one where a ribbon is wide; they bunch
-; only where it twists. Each ribbon keeps its last 24 strings. Every step
+; round, clockwise from the top-left corner), a speed v (starting at 3.2-3.8
+; dots a step, drifting by up to 0.08 a step, kept to 2.8-4.2) and a phase ph
+; that turns 0.008-0.014 radians a step, a pace and a way round of the
+; ribbon's own: its newest string runs from s to s + 940 (0.5 + 0.3 sin ph).
+; With s moving on several dots a step, strings lie far enough apart to show
+; one by one where a ribbon is wide; they bunch only where it twists. Each
+; ribbon keeps its last 20 strings. The original draws 30-35 strings a second;
+; at 10 steps a second, s goes further each step to keep the original's
+; speed round the screen, and fewer strings are kept. Every step
 ; first rubs out each ribbon's oldest string, then draws each ribbon's newest,
 ; solid (dots are set or cleared, never flipped), so a ribbon stays still
 ; where it isn't moving; only where strings cross do a few dots go missing.
@@ -27,16 +30,16 @@
 .import row_lo, row_hi, xbyte_lo, xbit_lo, xmod_lo, xbyte_hi, xmod_hi
 
 NRIB    = 2                     ; ribbons
-KEEP    = 24                    ; strings kept per ribbon
+KEEP    = 20                    ; strings kept per ribbon
 RING    = 32                    ; ring slots per ribbon
 NSLOT   = NRIB * RING
 PERIM   = 2 * (279 + 191)       ; the screen's edge: 940 dots round
 HALF    = PERIM / 2
-V_MIN   = 307                   ; speed, 8.8: slowest 1.2 dots a step,
-V_MAX   = 614                   ;   fastest 2.4,
-V_START = 359                   ;   starting 1.4-2.2 (359 + 0..204),
-V_SPAN  = 205
-V_DRIFT = 13                    ;   drifting up to 13 (of 256) a step: 0.05
+V_MIN   = 717                   ; speed, 8.8: slowest 2.8 dots a step,
+V_MAX   = 1075                  ;   fastest 4.2,
+V_START = 819                   ;   starting 3.2-3.8 (819 + 0..153),
+V_SPAN  = 154
+V_DRIFT = 20                    ;   drifting up to 20 (of 256) a step: 0.08
 DPH_MIN = 83                    ; phase step, 65536 = a full turn: 0.008-0.014
 DPH_SPAN = 64                   ;   radians (83 + 0..63), either way round
 
@@ -120,7 +123,7 @@ fx_strings_init:
         sta str_sh,x
         jsr rng_next
         sta str_sf,x
-        lda #V_SPAN             ; v: 1.4-2.2 dots a step
+        lda #V_SPAN             ; v: 3.2-3.8 dots a step
         jsr rng_below
         ldx G
         clc
@@ -210,7 +213,7 @@ slot:   and #RING - 1
 
 ; move: ribbon X's speed drifts, it moves on, its phase turns.
 move:
-        lda #2 * V_DRIFT + 1    ; v += -13..13 (of 256)
+        lda #2 * V_DRIFT + 1    ; v += -20..20 (of 256)
         jsr rng_below
         ldx G
         ldy #0
@@ -224,7 +227,7 @@ move:
         tya
         adc str_vh,x
         sta str_vh,x
-        lda str_vl,x            ; v below 1.2: 1.2
+        lda str_vl,x            ; v below 2.8: 2.8
         cmp #<V_MIN
         lda str_vh,x
         sbc #>V_MIN
@@ -234,7 +237,7 @@ move:
         lda #>V_MIN
         sta str_vh,x
         bra @go
-@fast:  lda #<V_MAX             ; above 2.4: 2.4
+@fast:  lda #<V_MAX             ; above 4.2: 4.2
         cmp str_vl,x
         lda #>V_MAX
         sbc str_vh,x
@@ -252,7 +255,7 @@ move:
         sta str_sl,x
         bcc :+
         inc str_sh,x
-:       sec                     ; past the last position (by under 3): round again
+:       sec                     ; past the last position (by under 5): round again
         lda str_sl,x
         sbc #<PERIM
         tay

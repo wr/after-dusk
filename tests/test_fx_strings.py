@@ -7,12 +7,13 @@ from fxcommon import ALLOWED, OVERHEAD, TICK, check_bit7, check_budget, check_in
 from sim import PAGE1, ST_TIMING, VblLatch
 
 FX = 7
-KEEP = 24                       # strings kept per ribbon
+KEEP = 20                       # strings kept per ribbon
 RING = 32                       # ring slots per ribbon
 PERIM = 2 * (279 + 191)         # 940: the screen's edge, clockwise from the top-left corner
 SWING = 0.3                     # far end: s + PERIM (0.5 + 0.3 sin ph)
-V_MIN, V_MAX = 307, 614         # speed limits, 8.8 (1.2-2.4 dots a step)
-V0_MIN, V0_MAX = 359, 563       # starting speeds, 8.8 (1.4-2.2 dots a step)
+V_MIN, V_MAX = 717, 1075        # speed limits, 8.8 (2.8-4.2 dots a step)
+V0_MIN, V0_MAX = 819, 972       # starting speeds, 8.8 (3.2-3.8 dots a step)
+V_DRIFT = 20                    # most the speed drifts in a step, 8.8 (0.08)
 DPH_MIN, DPH_MAX = 83, 146      # phase step, 65536 = a full turn (0.008-0.014 radians)
 FRAMES = 0x2C                   # timing.s: vertical blanks counted
 
@@ -170,11 +171,11 @@ def test_four_diagonals_fit(s):
     run(s, KEEP + 4)
     set_string(s, 0, 0, 0, 0, 279, 191)
     set_string(s, 1, 0, 279, 0, 0, 191)
-    for g, sint in ((0, 939), (1, 278)):           # the new ends land on corners too
+    for g, sint in ((0, 937), (1, 276)):           # the new ends land on corners too
         s.poke(s.addr("str_sl") + g, sint & 0xFF)
         s.poke(s.addr("str_sh") + g, sint >> 8)
-        s.poke(s.addr("str_sf") + g, 10)
-        s.poke(s.addr("str_vl") + g, V_MIN & 0xFF)  # at the slowest, s moves on 1 dot
+        s.poke(s.addr("str_sf") + g, 60)
+        s.poke(s.addr("str_vl") + g, V_MIN & 0xFF)  # at the slowest, s moves on 3 dots
         s.poke(s.addr("str_vh") + g, V_MIN >> 8)
         set_phase(s, g, -phase_step(s, g))          # phase 0 once moved: d = 470
     cycles = s.step()
@@ -248,7 +249,7 @@ def test_ribbons_start_anywhere_at_their_own_speed_and_turn(built):
     for seed in (0x1111, 0x2222, 0x3333, 0x4444, 0x5555, 0x6666, 0x7777, 0x8888):
         s = start(FX, seed=seed)
         for g in (0, 1):
-            assert V0_MIN <= speed(s, g) <= V0_MAX                 # 1.4-2.2 dots a step
+            assert V0_MIN <= speed(s, g) <= V0_MAX                 # 3.2-3.8 dots a step
             assert DPH_MIN <= abs(phase_step(s, g)) <= DPH_MAX     # 0.008-0.014 radians
             steps.add(phase_step(s, g))
             assert ribbon(s, g, "count") == 0
@@ -257,7 +258,7 @@ def test_ribbons_start_anywhere_at_their_own_speed_and_turn(built):
     assert len(steps) > 8
 
 
-def test_keeps_24_strings_per_ribbon(s):
+def test_keeps_20_strings_per_ribbon(s):
     run(s, KEEP + 20)
     for g in (0, 1):
         assert ribbon(s, g, "count") == KEEP
@@ -306,11 +307,73 @@ def test_speeds_drift_within_limits(s):
     assert all(len(v) > 10 for v in seen)
     assert V_MIN in seen[0] and V_MAX in seen[1]
     steps = [abs(a - b) for g in (0, 1) for a, b in zip(sorted(seen[g]), sorted(seen[g])[1:])]
-    assert max(steps) <= 2 * 13                        # drifts about 0.05 a step
+    assert max(steps) <= 2 * V_DRIFT                   # drifts up to 0.08 a step
+
+
+def test_speed_drifts_both_ways_by_up_to_0_08(s):
+    """Away from the limits the speed takes a random step of -0.08..0.08 each step,
+    both ways, as large as the sample's."""
+    for g in (0, 1):
+        s.poke(s.addr("str_vl") + g, 896 & 0xFF)     # 3.5, the middle
+        s.poke(s.addr("str_vh") + g, 896 >> 8)
+    deltas = set()
+    for _ in range(200):
+        before = [speed(s, g) for g in (0, 1)]
+        s.step()
+        for g in (0, 1):
+            v = speed(s, g)
+            if V_MIN + V_DRIFT <= before[g] <= V_MAX - V_DRIFT:
+                deltas.add(v - before[g])
+    assert min(deltas) == -V_DRIFT and max(deltas) == V_DRIFT
+    assert len(deltas) > 30
+
+
+def s_fixed(s, g):
+    """Ribbon g's position round the edge, 8 fraction bits."""
+    return ribbon(s, g, "sf") | ribbon(s, g, "sl") << 8 | ribbon(s, g, "sh") << 16
+
+
+def test_near_end_moves_on_by_the_speed_and_wraps_round_the_edge(s):
+    """s moves on by exactly the (drifted) speed each step, round the 940-dot edge and
+    back past the top-left corner, at every speed up to the fastest; the newest string
+    starts at s."""
+    for g in (0, 1):
+        s.poke(s.addr("str_vl") + g, V_MAX & 0xFF)
+        s.poke(s.addr("str_vh") + g, V_MAX >> 8)
+    wraps = [0, 0]
+    for n in range(600):
+        before = [s_fixed(s, g) for g in (0, 1)]
+        s.step()
+        for g in (0, 1):
+            after = s_fixed(s, g)
+            assert after == (before[g] + speed(s, g)) % (PERIM << 8), (n, g)
+            assert after >> 8 < PERIM
+            assert edge_pos(*strings(s, g)[-1][:2]) == after >> 8
+            wraps[g] += after < before[g]
+    assert all(w >= 1 for w in wraps)
+
+
+@pytest.mark.parametrize("s0", [PERIM * 256 - 1, (PERIM - 4) * 256, (PERIM - 1) * 256])
+def test_wraps_at_the_fastest_speed(s, s0):
+    """From just short of a full lap at about 4.2 dots a step, s comes back round past
+    the top-left corner, onto the top edge."""
+    for g in (0, 1):
+        s.poke(s.addr("str_vl") + g, V_MAX & 0xFF)
+        s.poke(s.addr("str_vh") + g, V_MAX >> 8)
+        s.poke(s.addr("str_sf") + g, s0 & 0xFF)
+        s.poke(s.addr("str_sl") + g, (s0 >> 8) & 0xFF)
+        s.poke(s.addr("str_sh") + g, s0 >> 16)
+    s.step()
+    for g in (0, 1):
+        want = (s0 + speed(s, g)) % (PERIM << 8)
+        assert s_fixed(s, g) == want
+        assert want >> 8 < 5
+        x, y = strings(s, g)[-1][:2]
+        assert (x, y) == (want >> 8, 0)
 
 
 def test_ribbons_move_smoothly(s):
-    """The near end moves on 1-3 dots every step, so no two strings share it; the far end
+    """The near end moves on 2-5 dots every step, so no two strings share it; the far end
     moves with it plus the phase's drift, up to 4 dots either way."""
     s.step()
     last = [strings(s, g)[-1] for g in (0, 1)]
@@ -321,11 +384,11 @@ def test_ribbons_move_smoothly(s):
             new = strings(s, g)[-1]
             near = (edge_pos(*new[:2]) - edge_pos(*last[g][:2])) % PERIM
             far = (edge_pos(*new[2:]) - edge_pos(*last[g][2:]) + PERIM // 2) % PERIM - PERIM // 2
-            assert near in (1, 2, 3)           # s moves 1.2-2.4 dots a step
+            assert near in (2, 3, 4, 5)        # s moves 2.8-4.2 dots a step
             assert -4 <= far - near <= 4       # 282 sin ph moves up to 3.95 dots a step
             moved[g] += near
             last[g] = new
-    assert all(m >= 60 * 1.2 - 1 for m in moved)
+    assert all(m >= 60 * 2.8 - 1 for m in moved)
 
 
 def test_screen_holds_only_the_kept_strings(s):

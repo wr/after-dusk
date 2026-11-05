@@ -88,8 +88,9 @@ frames to a deadline. `tests/mame/pacing.lua` checks every effect's real rate. F
   12 steps here, so the ends go 7-10.5 dots a step to match its speed); ends bounce off the edges
   of the whole screen; a step that rubs out and draws 8 lines corner to corner (about 79,000
   cycles) still fits 5 ticks.
-- String Theory: 2 ribbons of 24 strings at 6 ticks; its own unrolled line routine (`str_line`),
-  about twice as fast as `fline` on long lines.
+- String Theory: 2 ribbons of 20 strings at 6 ticks (the original draws 30-35 strings a second
+  against 10 steps here, so the ribbons move 2.8-4.2 dots a step to match its speed); its own
+  unrolled line routine (`str_line`), about twice as fast as `fline` on long lines.
 
 ## Never
 
