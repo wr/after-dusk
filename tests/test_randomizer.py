@@ -119,7 +119,9 @@ def test_fallback_pacing(built, fx):
     s = fx_start(fx)
     s.poke(0x2B, fx * 6)                  # FXOFF: the randomizer's current effect
     ticks = fx_entry(s, fx)[3]
-    for _ in range(40):                   # settle (worms only eat once their tails start)
+    # settle: worms only eat once their tails start; Nightlines' first steps, with
+    # both ends flying apart from the middle, draw longer lines than it does later
+    for _ in range(200 if fx == 6 else 40):
         s.step()
     periods = []
     for _ in range(24):
