@@ -1,52 +1,87 @@
-; Effect 8: Rose. Big 2 x 2 dots trace loops round a ring:
-;   x = 140 + 1.1 (36 cos(t + rot) + 18 cos(k t + rot))
-;   y =  96 +      36 sin(t + rot) + 18 sin(k t + rot)
-; with t moving on 0.03 radians and rot 0.0008 a point, four points a step.
-; k is a whole number 5-11 plus 0.015-0.04, so there are k - 1 loops round
-; the ring and they creep round a little each time; k is picked again every
-; 900 steps. The last 900 dots stay: once there are 900, each new dot first
-; rubs out the oldest, so the old figure fades as the new one comes. Drawn
-; straight onto page 1.
+; Effect 8: Rose, by the original After Dark Rose's method. Each step draws
+; 16 big 2 x 2 dots, k = 1..16, u = 22.5k degrees:
+;   x = 140 + floor(1.1 C (B sin(A u) + sin(t + u)))
+;   y =  96 + floor(    C (B cos(A u) + cos(t + u)))
+; so each dot circles (radius C) round its own centre, and t turns 1.5
+; degrees a step (240 to a turn). sin(A u) comes from a 128-step table: u is
+; 8k 128ths of a turn, so its index is floor(8 k A) & 127.
+; A is 0, 1, 4, 9 or 16, B one of 64 values from -1.28 to 1.24, C one of 32
+; sizes up to 4/9 of the half-height; all three glide in a straight line to
+; new random values over 250 steps, then pick again. C starts at 0. The last
+; 720 dots stay (45 steps): before each new dot is drawn, the one it
+; replaces is rubbed out. Drawn straight onto page 1.
 
 .include "config.inc"
 
 .export fx_rose_init, fx_rose_step
-.export rose_x, rose_y, rose_head, rose_tail, rose_count
-.export rose_t, rose_kt, rose_rot, rose_kdt, rose_n
+.export rose_ring, rose_slot, rose_full, rose_n, rose_t, rose_from, rose_to
+.export rose_curl, rose_curh, rose_rem
 
-.import rng_next, rng_below, show_page1
+.import rng_below, show_page1, vbl_poll
 .import row_lo, row_hi, xbyte_lo, xbit_lo
 
-CAP     = 900                   ; dots kept
-REPICK  = 900                   ; steps between new loop counts
-; Angles are 24 bits: the top byte is the table step (256 to a turn).
-DT      = 80105                 ; 0.03 radians
-DROT    = 2136                  ; 0.0008 radians
-FMIN    = 1204                  ; k's fraction 0.015 (x DT), up to FMIN + 249 x 8:
-                                ; 0.04
+DOTS    = 16                    ; dots a step
+SLOTS   = 45                    ; steps kept: 720 dots
+GLIDE   = 250                   ; steps from one value to the next
+STEPS   = 240                   ; t's steps to a turn
+
+; The gliding values, each a whole number plus 250ths so the glide is exact:
+GA = 0                          ; 8 A (the angle index's step from dot to dot)
+GB = 1                          ; B, signed, 8192 = 1
+GC = 2                          ; C, 8.8 dots (x 256/255, see gen_rose.py)
+GX = 3                          ; 1.1 C, likewise
 
 ; ---- state in FXRAM ----
-rose_x     = FXRAM              ; 1024: ring of dots, x (top-left of the dot)
-rose_y     = FXRAM + $0400      ; 1024: ... and y
-rose_head  = FXRAM + $0800      ; 2: next slot to fill, 0-1023
-rose_tail  = rose_head + 2      ; 2: oldest dot kept
-rose_count = rose_tail + 2      ; 2: dots kept, 0-900
-rose_t     = rose_count + 2     ; 3: t
-rose_kt    = rose_t + 3         ; 3: k t
-rose_rot   = rose_kt + 3        ; 3: rot
-rose_kdt   = rose_rot + 3       ; 3: k x DT
-rose_n     = rose_kdt + 3       ; 2: steps since k was picked
+rose_ring  = FXRAM              ; 45 x 32: the kept dots, a step's 16 (x, y)
+rose_txl   = FXRAM + SLOTS * DOTS * 2   ; 16: 1.1 C sin(t + 22.5 j), 8.8
+rose_txh   = rose_txl + 16
+rose_tyl   = rose_txh + 16      ; 16: C sin(t + 22.5 j), 8.8
+rose_tyh   = rose_tyl + 16
+rose_curl  = rose_tyh + 16      ; 4: each value now, whole part
+rose_curh  = rose_curl + 4
+rose_rem   = rose_curh + 4      ; 4: ... and its 250ths
+rose_dwl   = rose_rem + 4       ; 4: its step, whole part (signed)
+rose_dwh   = rose_dwl + 4
+rose_dr    = rose_dwh + 4       ; 4: ... and its 250ths
+rose_tvl   = rose_dr + 4        ; 4: its target
+rose_tvh   = rose_tvl + 4
+rose_from  = rose_tvh + 4       ; 3: table indices of A, B, C at the glide's start
+rose_to    = rose_from + 3      ; 3: ... and at its end
+rose_n     = rose_to + 3        ; steps into the glide, 0-249
+rose_t     = rose_n + 1         ; t, 0-239
+rose_slot  = rose_t + 1         ; the ring's next step slot, 0-44
+rose_full  = rose_slot + 1      ; step slots filled, 0-45
 
 ; ---- zero page ----
-ROW0 = FXZ                      ; 2: the dot's top row
-ROW1 = FXZ+2                    ; 2: its bottom row
-MASK = FXZ+4
-RP   = FXZ+5                    ; 2: a slot in the ring
-NX   = FXZ+7                    ; the new dot
-NY   = FXZ+8
-LEFT = FXZ+9                    ; points still to add this step
-FHI  = FXZ+10                   ; while picking k: its fraction's high byte
-WHOLE = FXZ+11                  ; ... and its whole number
+ML   = FXZ                      ; mul: the 16-bit multiplicand
+MH   = FXZ+1
+MF   = FXZ+2                    ; ... the multiplier, then the product's low byte
+PM   = FXZ+3                    ; ... the product's middle byte
+CBL  = FXZ+4                    ; C |B|, 8.8
+CBH  = FXZ+5
+CBXL = FXZ+6                    ; 1.1 C |B|
+CBXH = FXZ+7
+ABL  = FXZ+8                    ; |B|
+ABH  = FXZ+9
+SGNB = FXZ+10                   ; $80 when B < 0
+ACCW = FXZ+11                   ; k x 8 A: whole part (mod 256)...
+ACCR = FXZ+12                   ; ... and 250ths
+K    = FXZ+13                   ; the dot, 1-16
+RO   = FXZ+14                   ; its (x, y) in the ring slot, 0-30
+RP   = FXZ+15                   ; 2: the ring slot
+NX   = FXZ+17                   ; the new dot
+NY   = FXZ+18
+IDX  = FXZ+19                   ; its angle index
+TL   = FXZ+20                   ; a signed 8.8 term
+TH   = FXZ+21
+P1   = FXZ+22                   ; mulb: the product's bytes 1 and 2
+P2   = FXZ+23
+TA   = FXZ+24                   ; t + 15 j, 0-239
+TM   = FXZ+25                   ; its sine's magnitude
+J    = FXZ+26
+ROW0 = FXZ+27                   ; 2: the dot's top row
+ROW1 = FXZ+29                   ; 2: its bottom row
+MASK = FXZ+31
 
 .segment "FX8"
         jmp fx_rose_init        ; the overlay's entry points
@@ -55,194 +90,446 @@ WHOLE = FXZ+11                  ; ... and its whole number
 ; ================================================================ init
 fx_rose_init:
         jsr show_page1
-        ldx #rose_n + 2 - rose_head - 1
-:       stz rose_head,x         ; empty ring, t = k t = 0
+        stz rose_n
+        stz rose_t
+        stz rose_slot
+        stz rose_full
+        lda #5                  ; A and B start anywhere, C at 0
+        jsr rng_below
+        sta rose_to
+        lda #64
+        jsr rng_below
+        sta rose_to+1
+        stz rose_to+2
+        jsr targets
+        ; fall through: start the first glide from there
+
+; glide: the targets are reached; they become the start, and new ones are
+; picked.
+glide:  stz rose_n
+        ldx #2
+:       lda rose_to,x
+        sta rose_from,x
         dex
         bpl :-
-        jsr rng_next            ; rot starts anywhere
-        sta rose_rot+2
-        ; fall through
+        ldx #3
+:       lda rose_tvl,x
+        sta rose_curl,x
+        lda rose_tvh,x
+        sta rose_curh,x
+        stz rose_rem,x
+        dex
+        bpl :-
+        lda #5                  ; new targets
+        jsr rng_below
+        sta rose_to
+        lda #64
+        jsr rng_below
+        sta rose_to+1
+        lda #32
+        jsr rng_below
+        sta rose_to+2
+        jsr targets
+        ldx #3                  ; each value's step: (target - now) / 250,
+@each:  sec                     ; floored, and the 250ths left over
+        lda rose_tvl,x
+        sbc rose_curl,x
+        sta TL
+        lda rose_tvh,x
+        sbc rose_curh,x
+        sta TH
+        bpl @pos
+        jsr neg_t               ; down: divide the size...
+        jsr div250
+        tay
+        lda TL                  ; ...then whole = -q - 1 = ~q, 250ths = 250 - r
+        eor #$FF
+        sta rose_dwl,x
+        lda TH
+        eor #$FF
+        sta rose_dwh,x
+        tya
+        beq @exact
+        eor #$FF                ; 250 - r = 251 + ~r
+        clc
+        adc #251
+        sta rose_dr,x
+        bra @next
+@exact: inc rose_dwl,x          ; r = 0: whole = -q, nothing left over
+        bne :+
+        inc rose_dwh,x
+:       stz rose_dr,x
+        bra @next
+@pos:   jsr div250
+        sta rose_dr,x
+        lda TL
+        sta rose_dwl,x
+        lda TH
+        sta rose_dwh,x
+@next:  dex
+        bpl @each
+        rts
 
-; pick: k = 5-11 plus 0.015-0.04, as k x DT. The step count starts again.
-pick:   stz rose_n
-        stz rose_n+1
-        lda #7                  ; the whole number
-        jsr rng_below
+; targets: each value's target, from the tables.
+targets:
+        ldx rose_to
+        lda rose_a8,x
+        sta rose_tvl+GA
+        stz rose_tvh+GA
+        ldx rose_to+1
+        lda rose_bl,x
+        sta rose_tvl+GB
+        lda rose_bh,x
+        sta rose_tvh+GB
+        ldx rose_to+2
+        lda rose_cl,x
+        sta rose_tvl+GC
+        lda rose_ch,x
+        sta rose_tvh+GC
+        lda rose_cxl,x
+        sta rose_tvl+GX
+        lda rose_cxh,x
+        sta rose_tvh+GX
+        rts
+
+; div250: TL/TH (unsigned) /= 250; A = the remainder. Keeps X.
+div250: lda #0
+        ldy #16
+@bit:   asl TL
+        rol TH
+        rol a
+        bcs @sub                ; 256 or more
+        cmp #GLIDE
+        bcc @no
+@sub:   sbc #GLIDE              ; (carry is set either way)
+        inc TL
+@no:    dey
+        bne @bit
+        rts
+
+; neg_t: TL/TH = -TL/TH.
+neg_t:  sec
+        lda #0
+        sbc TL
+        sta TL
+        lda #0
+        sbc TH
+        sta TH
+        rts
+
+; mul: A x ML/MH (unsigned) -> A (high), PM, MF (low). Keeps X.
+mul:    lsr a
+        sta MF
+        lda #0
+        sta PM
+        .repeat 8
+        bcc :+
+        tay
         clc
-        adc #5
-        sta WHOLE
-        lda #250                ; the fraction: FMIN + 8 r
-        jsr rng_below
-        stz FHI
-        asl a
-        rol FHI
-        asl a
-        rol FHI
-        asl a
-        rol FHI
+        lda PM
+        adc ML
+        sta PM
+        tya
+        adc MH
+:       ror a
+        ror PM
+        ror MF
+        .endrepeat
+        rts
+
+; mulb: TL/TH = ML/MH x |B| / 8192.
+mulb:   lda ABL
+        jsr mul
+        sta P2
+        lda PM
+        sta P1
+        lda ABH
+        jsr mul                 ; this one's three bytes go one byte up
+        tay
         clc
-        adc #<FMIN
-        sta rose_kdt
-        lda FHI
-        adc #>FMIN
-        sta rose_kdt+1
-        stz rose_kdt+2
-:       clc                     ; plus the whole number x DT
-        lda rose_kdt
-        adc #<DT
-        sta rose_kdt
-        lda rose_kdt+1
-        adc #>DT
-        sta rose_kdt+1
-        lda rose_kdt+2
-        adc #^DT
-        sta rose_kdt+2
-        dec WHOLE
-        bne :-
+        lda P1
+        adc MF
+        sta P1
+        lda P2
+        adc PM
+        sta P2
+        tya
+        adc #0
+        .repeat 3               ; bytes 1-3, three bits up, are the top 16
+        asl P1                  ; bits of the product / 8192
+        rol P2
+        rol a
+        .endrepeat
+        sta TH
+        lda P2
+        sta TL
         rts
 
 ; ================================================================ step
 fx_rose_step:
-        lda #4
-        sta LEFT
-@point: lda rose_count          ; full: the oldest dot goes first
-        cmp #<CAP
-        bne @grow
-        lda rose_count+1
-        cmp #>CAP
-        bne @grow
-        jsr erase_oldest
-        bra @move
-@grow:  inc rose_count
-        bne @move
-        inc rose_count+1
+        jsr vbl_poll
+        ; B's sign and size, and C |B|, 1.1 C |B|
+        lda rose_curl+GB
+        sta ABL
+        lda rose_curh+GB
+        sta ABH
+        and #$80
+        sta SGNB
+        beq :+
+        sec
+        lda #0
+        sbc ABL
+        sta ABL
+        lda #0
+        sbc ABH
+        sta ABH
+:       lda rose_curl+GC
+        sta ML
+        lda rose_curh+GC
+        sta MH
+        jsr mulb
+        lda TL
+        sta CBL
+        lda TH
+        sta CBH
+        lda rose_curl+GX
+        sta ML
+        lda rose_curh+GX
+        sta MH
+        jsr mulb
+        lda TL
+        sta CBXL
+        lda TH
+        sta CBXH
 
-@move:  clc                     ; t += DT
+        ; C sin(t + 22.5 j) and 1.1 C sin(t + 22.5 j) for j = 0-15: eight
+        ; products, and their negatives half a turn on.
+        jsr vbl_poll
         lda rose_t
-        adc #<DT
-        sta rose_t
-        lda rose_t+1
-        adc #>DT
-        sta rose_t+1
-        lda rose_t+2
-        adc #^DT
-        sta rose_t+2
-        clc                     ; k t += k DT
-        lda rose_kt
-        adc rose_kdt
-        sta rose_kt
-        lda rose_kt+1
-        adc rose_kdt+1
-        sta rose_kt+1
-        lda rose_kt+2
-        adc rose_kdt+2
-        sta rose_kt+2
-        clc                     ; rot += DROT
-        lda rose_rot
-        adc #<DROT
-        sta rose_rot
-        lda rose_rot+1
-        adc #>DROT
-        sta rose_rot+1
-        lda rose_rot+2
-        adc #^DROT
-        sta rose_rot+2
+        sta TA
+        ldx #0
+@tj:    ldy TA
+        lda rose_s240,y
+        sta TM
+        lda rose_curl+GC
+        sta ML
+        lda rose_curh+GC
+        sta MH
+        lda TM
+        jsr mul
+        jsr signed
+        lda TL
+        sta rose_tyl,x
+        lda TH
+        sta rose_tyh,x
+        jsr neg_t
+        lda TL
+        sta rose_tyl+8,x
+        lda TH
+        sta rose_tyh+8,x
+        lda rose_curl+GX
+        sta ML
+        lda rose_curh+GX
+        sta MH
+        lda TM
+        jsr mul
+        jsr signed
+        lda TL
+        sta rose_txl,x
+        lda TH
+        sta rose_txh,x
+        jsr neg_t
+        lda TL
+        sta rose_txl+8,x
+        lda TH
+        sta rose_txh+8,x
+        lda TA                  ; 22.5 degrees on
+        clc
+        adc #15
+        cmp #STEPS
+        bcc :+
+        sbc #STEPS
+:       sta TA
+        inx
+        cpx #8
+        bne @tj
 
-        clc                     ; X = step of t + rot
-        lda rose_t
-        adc rose_rot
-        lda rose_t+1
-        adc rose_rot+1
-        lda rose_t+2
-        adc rose_rot+2
-        tax
-        clc                     ; Y = step of k t + rot
-        lda rose_kt
-        adc rose_rot
-        lda rose_kt+1
-        adc rose_rot+1
-        lda rose_kt+2
-        adc rose_rot+2
+        ; the ring slot this step fills: slot x 32
+        lda rose_slot
+        lsr a
+        lsr a
+        lsr a
+        clc
+        adc #>rose_ring
+        sta RP+1
+        lda rose_slot
+        asl a
+        asl a
+        asl a
+        asl a
+        asl a
+        sta RP                  ; (rose_ring is page-aligned)
+        stz RO
+        stz ACCW
+        stz ACCR
+        lda #1
+        sta K
+
+@dot:   jsr vbl_poll
+        clc                     ; k x 8 A, a whole number plus 250ths
+        lda ACCR
+        adc rose_rem+GA
+        bcs @over
+        cmp #GLIDE
+        bcc @in
+@over:  sbc #GLIDE
+        sec
+@in:    sta ACCR
+        lda ACCW
+        adc rose_curl+GA
+        sta ACCW
+        and #127
+        sta IDX
+        ; x = 140 + 1.1 C B sin(A u) + 1.1 C sin(t + u)
         tay
-        lda rose_cx,y           ; x: the loop, half the ring's size...
-        cmp #$80                ; (signed halving, rounded)
-        ror a
-        adc #0
-        clc                     ; ...plus the ring. The offsets are signed
-        adc rose_cx,x           ; and the dot is always on screen, so
-        clc                     ; plain byte sums work.
+        lda CBXL
+        sta ML
+        lda CBXH
+        sta MH
+        lda rose_s128,y
+        jsr mul
+        sta TH
+        lda PM
+        sta TL
+        lda IDX                 ; negative in the second half turn, and
+        asl a                   ; when B is
+        eor SGNB
+        bpl :+
+        jsr neg_t
+:       lda K
+        and #15
+        tax
+        clc
+        lda TL
+        adc rose_txl,x
+        lda TH
+        adc rose_txh,x
+        clc
         adc #140
         sta NX
-        lda rose_sy,y           ; y likewise
-        cmp #$80
-        ror a
-        adc #0
+        ; y = 96 + C B cos(A u) + C cos(t + u), the cosines a quarter turn on
+        lda IDX
         clc
-        adc rose_sy,x
+        adc #32
+        and #127
+        sta IDX
+        tay
+        lda CBL
+        sta ML
+        lda CBH
+        sta MH
+        lda rose_s128,y
+        jsr mul
+        sta TH
+        lda PM
+        sta TL
+        lda IDX
+        asl a
+        eor SGNB
+        bpl :+
+        jsr neg_t
+:       lda K
+        clc
+        adc #4
+        and #15
+        tax
+        clc
+        lda TL
+        adc rose_tyl,x
+        lda TH
+        adc rose_tyh,x
         clc
         adc #96
         sta NY
 
-        lda rose_head           ; keep it
-        sta RP
-        lda rose_head+1
-        clc
-        adc #>rose_x
-        sta RP+1
-        lda NX
-        sta (RP)
-        lda RP+1
-        adc #>(rose_y - rose_x) ; (carry clear)
-        sta RP+1
-        lda NY
-        sta (RP)
-        inc rose_head
-        bne :+
-        lda rose_head+1
-        inc a
-        and #$03
-        sta rose_head+1
-:       ldx NX                  ; and draw it
-        ldy NY
-        jsr dot_set
-        dec LEFT
-        beq :+
-        jmp @point
-
-:       inc rose_n              ; every 900 steps, a new k
-        bne :+
-        inc rose_n+1
-:       lda rose_n
-        cmp #<REPICK
-        bne :+
-        lda rose_n+1
-        cmp #>REPICK
-        bne :+
-        jmp pick
-:       rts
-
-; erase_oldest: rub out the oldest dot; it leaves the ring.
-erase_oldest:
-        lda rose_tail
-        sta RP
-        lda rose_tail+1
-        clc
-        adc #>rose_x
-        sta RP+1
-        lda (RP)
+        lda rose_full           ; rub out the dot this one replaces
+        cmp #SLOTS
+        bne @keep
+        ldy RO
+        lda (RP),y
         tax
-        lda RP+1
-        adc #>(rose_y - rose_x) ; (carry clear)
-        sta RP+1
-        lda (RP)
+        iny
+        lda (RP),y
         tay
         jsr dot_clear
-        inc rose_tail
+@keep:  ldy RO                  ; keep the new one, and draw it
+        lda NX
+        sta (RP),y
+        iny
+        lda NY
+        sta (RP),y
+        iny
+        sty RO
+        ldx NX
+        ldy NY
+        jsr dot_set
+        inc K
+        lda K
+        cmp #DOTS + 1
+        beq :+
+        jmp @dot
+
+:       lda rose_full           ; the slot is filled
+        cmp #SLOTS
+        beq :+
+        inc rose_full
+:       ldx rose_slot
+        inx
+        cpx #SLOTS
         bne :+
-        lda rose_tail+1
-        inc a
-        and #$03
-        sta rose_tail+1
+        ldx #0
+:       stx rose_slot
+        ldx rose_t              ; t turns on
+        inx
+        cpx #STEPS
+        bne :+
+        ldx #0
+:       stx rose_t
+
+        ldx #3                  ; each value glides on
+@g:     clc
+        lda rose_rem,x
+        adc rose_dr,x
+        bcs @gover
+        cmp #GLIDE
+        bcc @gin
+@gover: sbc #GLIDE
+        sec
+@gin:   sta rose_rem,x
+        lda rose_curl,x
+        adc rose_dwl,x
+        sta rose_curl,x
+        lda rose_curh,x
+        adc rose_dwh,x
+        sta rose_curh,x
+        dex
+        bpl @g
+        inc rose_n              ; at the end, new targets
+        lda rose_n
+        cmp #GLIDE
+        bne :+
+        jmp glide
+:       rts
+
+; signed: TL/TH = A/PM (mul's top 16 bits), negative when sin(TA) is
+; (TA in the second half turn). Keeps X.
+signed: sta TH
+        lda PM
+        sta TL
+        lda TA
+        cmp #STEPS / 2
+        bcc :+
+        jmp neg_t
 :       rts
 
 ; ================================================================ dots
