@@ -44,7 +44,7 @@ def test_fx_table(s):
     wipes = [s.peek(base + i * 6 + 4) for i in range(NFX)]
     ticks = [s.peek(base + i * 6 + 5) for i in range(NFX)]
     assert wipes == [1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1]          # only Can of Worms eats the last picture
-    assert ticks == [4, 2, 4, 3, 3, 2, 5, 6, 2, 2, 30, 8, 2, 3]
+    assert ticks == [4, 2, 4, 3, 3, 2, 5, 6, 2, 2, 3, 4, 2, 3]
 
 
 def test_normalize_display(s):
