@@ -4,12 +4,13 @@
 local T = dofile("tests/mame/lib.lua")
 T.run(function()
   T.wait_started()
+  local NFX = T.peek(T.label("fx_count"))
   local seen = {}
   local tries = 0
-  while tries < 80 do
+  while tries < 20 * NFX do
     tries = tries + 1
     local fx, st = T.peek(T.ST_FX), T.peek(T.ST_STARTS)
-    if fx <= 5 and not seen[fx] then
+    if fx < NFX and not seen[fx] then
       T.wait_frames(90)                       -- past the wipe and init
       local b1 = T.peek16(T.ST_BEAT)
       T.wait_frames(300)
@@ -27,12 +28,12 @@ T.run(function()
       end
     end
     local n = 0
-    for i = 0, 5 do if seen[i] then n = n + 1 end end
-    if n == 6 then break end
+    for i = 0, NFX - 1 do if seen[i] then n = n + 1 end end
+    if n == NFX then break end
     local s = T.peek(T.ST_STARTS)
     T.press(" ")
     T.wait_until(function() return T.peek(T.ST_STARTS) ~= s end, 120)
   end
-  for i = 0, 5 do T.check(seen[i], "never measured effect " .. i) end
+  for i = 0, NFX - 1 do T.check(seen[i], "never measured effect " .. i) end
   if not T.failed then T.pass("pacing") end
 end)

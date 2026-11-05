@@ -27,11 +27,19 @@ class SpeakerError(AssertionError):
     pass
 
 
+RDMAINRAM, RDCARDRAM, WRMAINRAM, WRCARDRAM = 0xC002, 0xC003, 0xC004, 0xC005
+
+
 class Mem:
-    """64K of RAM that refuses the speaker and can record writes."""
+    """64K of RAM that refuses the speaker and can record writes, plus the IIc's
+    auxiliary 64K: writing $C003/$C005 sends reads/writes of $0200-$BFFF there
+    (instruction fetches included), $C002/$C004 sends them back to main."""
 
     def __init__(self):
         self.ram = bytearray(0x10000)
+        self.aux = bytearray(0x10000)
+        self.rd_aux = False
+        self.wr_aux = False
         self.track = False
         self.written = set()
         self.reads = set()
@@ -46,6 +54,8 @@ class Mem:
             self.reads.add(a)
         if self.read_hooks and a in self.read_hooks:
             return self.read_hooks[a]()
+        if self.rd_aux and 0x0200 <= a < 0xC000:
+            return self.aux[a]
         return self.ram[a]
 
     def __setitem__(self, a, v):
@@ -53,7 +63,16 @@ class Mem:
             raise SpeakerError(f"speaker write at ${a:04X}")
         if self.write_hooks and a in self.write_hooks:
             self.write_hooks[a](v)
-        self.ram[a] = v & 0xFF
+        if RDMAINRAM <= a <= WRCARDRAM:
+            if a < WRMAINRAM:
+                self.rd_aux = a == RDCARDRAM
+            else:
+                self.wr_aux = a == WRCARDRAM
+            return
+        if self.wr_aux and 0x0200 <= a < 0xC000:
+            self.aux[a] = v & 0xFF
+        else:
+            self.ram[a] = v & 0xFF
         if self.track:
             self.written.add(a)
 
@@ -89,6 +108,16 @@ class Sim:
         v &= 0xFFFF
         self.mem.ram[a] = v & 0xFF
         self.mem.ram[a + 1] = v >> 8
+
+    def load_effects(self):
+        """As HELLO and start do: the FX file at $2000, copied to aux memory,
+        both pages cleared, and the aux copy loop in the language card."""
+        data = (BUILD / "fx.bin").read_bytes()
+        self.mem.ram[0x2000:0x2000 + len(data)] = data
+        self.call("fx_stash", max_cycles=2_000_000)
+        self.mem.ram[0x2000:0x6000] = bytes(0x4000)
+        self.call("lc_install")
+        return self
 
     def set_point(self, x, y, xa=PX, ya=PY):
         self.poke16(xa, x)

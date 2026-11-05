@@ -1,5 +1,8 @@
-"""Shared checks for the six effects (Tasks 7-12)."""
+"""Shared checks for the effects."""
 from sim import PAGE1, PAGE2, ST_FX, ST_TIMING, Sim
+
+NFX = 6                         # effects (fx_count)
+OVL = 0x8800                    # the overlay slot: jmp init, jmp step
 
 # Writes an effect may make: drawing scratch, RNG and core scratch, DISP,
 # sprite engine, its own zero page, the extra drawing scratch, the stack,
@@ -16,18 +19,19 @@ BUDGET = {0: 57_902, 1: 28_951, 2: 57_902, 3: 43_426, 4: 43_426, 5: 43_426}
 
 def fx_entry(s, fx):
     base = s.addr("fx_table") + fx * 6
-    init = s.peek16(base)
-    step = s.peek16(base + 2)
-    return init, step, s.peek(base + 4), s.peek(base + 5)
+    return OVL, OVL + 3, s.peek(base + 4), s.peek(base + 5)
 
 
 def start(fx, seed=0x4D2A, prepare=None):
-    """A Sim with sprites set up and effect `fx` initialised as the randomizer would."""
-    s = Sim()
+    """A Sim set up as After Dusk is after start-up (effects in aux memory,
+    sprites and tables built), with effect `fx` loaded and initialised as the
+    randomizer would."""
+    s = Sim().load_effects()
     s.poke(ST_TIMING, 0)
     s.mem.ram[0xFFFA:0x10000] = bytes(6)
     s.call("sprite_setup", max_cycles=3_000_000)
     s.call("make_tables", max_cycles=200_000)
+    s.call("load_fx", a=fx)
     s.poke16(0x20, seed)
     s.poke(ST_FX, fx)
     init, step, wipe, _ = fx_entry(s, fx)

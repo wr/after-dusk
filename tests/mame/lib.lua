@@ -30,8 +30,19 @@ function T.label(name)
   return labels[name]
 end
 
-function T.peek(a) return mem:read_u8(a) end
-function T.peek16(a) return mem:read_u8(a) + 256 * mem:read_u8(a + 1) end
+-- Reads go through the CPU, so while After Dusk copies an effect out of aux
+-- memory (aux_fetch: RAMRD on, for a few frames) a read of $0200-$BFFF would
+-- see aux memory. Wait that out first, when the caller can wait.
+local RDRAMRD = 0xC013          -- bit 7 set while reads come from aux
+local function main_ram(a)
+  if a < 0x0200 or a >= 0xC000 or not coroutine.isyieldable() then return end
+  for _ = 1, 30 do
+    if (mem:read_u8(RDRAMRD) & 0x80) == 0 then return end
+    coroutine.yield()
+  end
+end
+function T.peek(a) main_ram(a); return mem:read_u8(a) end
+function T.peek16(a) main_ram(a); return mem:read_u8(a) + 256 * mem:read_u8(a + 1) end
 function T.poke(a, v) mem:write_u8(a, v) end
 function T.pc() return cpu.state["PC"].value end
 
@@ -76,8 +87,9 @@ function T.running()
 end
 
 -- The speaker guard. The IIc ROM beeps at power-on, so only accesses made
--- while After Dusk's own code is executing count. (The language card only
--- ever holds sprite data, never code, and the ROM shares its addresses.)
+-- while After Dusk's own code is executing count. (The language card holds
+-- sprite data and aux_fetch, a short copy loop that never touches the
+-- speaker; the ROM shares its addresses.)
 local function guard(offset, data, mask)
   if T.running() and not T.speaker_hit then
     T.speaker_hit = true

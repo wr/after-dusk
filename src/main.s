@@ -5,23 +5,28 @@
 ; wipe the screen first if the effect wants that, call its init once, then
 ; its step every ticks_per_step ticks until a key is pressed or FX_TICKS
 ; ticks have passed.
+;
+; The effects themselves aren't in this program. HELLO loads them all (the FX
+; file) at $2000 before BRUN; start copies that to aux memory, and each
+; effect is copied from there into the overlay slot at $8800 when its turn
+; comes. See after-dusk.cfg.
 
 .include "config.inc"
 
 .export start, restart, begin_effect, step_once, pick_next, normalize_display
-.export fx_table
+.export fx_table, fx_count, fx_stash, lc_install, load_fx
 
 .import timing_init, wait_ticks, timing_sync, rng_seed, rng_below, key_pressed
 .import clear_page, copy_page, show_page1, wipe_to_black, plot
 .import sprite_setup, make_tables
-.import fx_toasters_init, fx_toasters_step
-.import fx_warp_init, fx_warp_step
-.import fx_starry_init, fx_starry_step
-.import fx_zot_init, fx_zot_step
-.import fx_worms_init, fx_worms_step
-.import fx_liss_init, fx_liss_step
+.import __LCCODE_LOAD__, __LCCODE_SIZE__
+.import __FX0_LOAD__, __FX0_SIZE__, __FX1_LOAD__, __FX1_SIZE__
+.import __FX2_LOAD__, __FX2_SIZE__, __FX3_LOAD__, __FX3_SIZE__
+.import __FX4_LOAD__, __FX4_SIZE__, __FX5_LOAD__, __FX5_SIZE__
 
 FXOFF   = CORE+6        ; current effect's offset into fx_table (id * 6)
+LSRC    = DSX+12        ; 2: copy source (drawing scratch, free between effects)
+LDST    = DSX+14        ; 2: copy destination
 
 SOFTEV  = $03F2         ; reset vector, and its check byte at $03F4
 PWREDUP = $03F4
@@ -29,6 +34,8 @@ PWREDUP = $03F4
 .segment "CODE"
 
 start:                          ; BRUN enters here ($6000)
+        sei
+        jsr fx_stash            ; the effects, before anything clears the screen
         jsr setup
         jsr rng_seed
         lda #$FF
@@ -70,6 +77,7 @@ setup:
         jsr timing_init         ; reads the ROM: before the language card
         jsr sprite_setup        ; language card RAM in from here on
         jsr make_tables
+        jsr lc_install
         lda #<restart           ; Ctrl-Reset comes back to us
         sta SOFTEV
         lda #>restart
@@ -90,17 +98,17 @@ begin_effect:
         clc
         adc FXOFF
         sta FXOFF
-        tax
+        lda ST_FX               ; its code into the overlay slot
+        jsr load_fx
+        ldx FXOFF
         jsr timing_sync         ; ticks count from now, not from before
         lda fx_table+4,x
         beq :+
         jsr wipe_to_black
-:       ldx FXOFF
-        jsr @init
+:       jsr OVL                 ; the effect's init
         stz TICKS
         stz TICKS+1
         jmp timing_sync         ; and again after a long set-up
-@init:  jmp (fx_table,x)
 
 ; step_once: one step of the current effect, then wait out its ticks.
 ; Returns carry set when the effect should end (key, or time up).
@@ -135,12 +143,11 @@ step_once:
         lda TICKS+1
         sbc #>FX_TICKS
 @end:   rts
-@step:  ldx FXOFF
-        jmp (fx_table+2,x)
+@step:  jmp OVL_STEP
 
 ; pick_next: a random effect id in A, never the one in ST_FX.
 pick_next:
-:       lda #6
+:       lda #NFX
         jsr rng_below
         cmp ST_FX
         beq :-
@@ -165,17 +172,91 @@ normalize_display:
 fx_slow:
         .byte 1, 0, 4, 3, 1, 2
 
-; Per effect: init, step, wipe first (1/0), ticks per step.
+; Per effect: where it is in aux memory and its size, wipe first (1/0),
+; ticks per step. The FX file is effects 0, 1, 2... one after another.
+fx_count:
+        .byte NFX
 fx_table:
-        .word fx_toasters_init, fx_toasters_step
+        .word __FX0_LOAD__, __FX0_SIZE__
         .byte 1, 4              ; 0 Flying Toasters
-        .word fx_warp_init, fx_warp_step
+        .word __FX1_LOAD__, __FX1_SIZE__
         .byte 1, 2              ; 1 Warp
-        .word fx_starry_init, fx_starry_step
+        .word __FX2_LOAD__, __FX2_SIZE__
         .byte 1, 4              ; 2 Starry Night
-        .word fx_zot_init, fx_zot_step
+        .word __FX3_LOAD__, __FX3_SIZE__
         .byte 0, 3              ; 3 Zot!
-        .word fx_worms_init, fx_worms_step
+        .word __FX4_LOAD__, __FX4_SIZE__
         .byte 0, 3              ; 4 Can of Worms
-        .word fx_liss_init, fx_liss_step
+        .word __FX5_LOAD__, __FX5_SIZE__
         .byte 1, 3              ; 5 Lissajous
+
+; ---------------------------------------------------------------- loader
+; fx_stash: copy main $2000-$5FFF, where HELLO loaded the FX file, to the
+; same addresses in aux memory. Once, at BRUN; Ctrl-Reset keeps the copy.
+fx_stash:
+        stz LSRC
+        lda #>FXSTORE
+        sta LSRC+1
+        ldy #0
+        sta WRCARDRAM           ; writes to aux; reads (and this code) main
+@copy:  lda (LSRC),y
+        sta (LSRC),y
+        iny
+        bne @copy
+        inc LSRC+1
+        lda LSRC+1
+        cmp #>FXSTORE_END
+        bne @copy
+        sta WRMAINRAM
+        rts
+
+; lc_install: put aux_fetch into language-card RAM. setup calls it once the
+; card's RAM is switched in.
+lc_install:
+        ldx #<__LCCODE_SIZE__
+:       lda __LCCODE_LOAD__-1,x
+        sta aux_fetch-1,x
+        dex
+        bne :-
+        rts
+
+; load_fx: copy effect A's code from aux memory into the overlay slot, in
+; whole pages (the slot is whole pages, so the overrun stays inside it).
+load_fx:
+        asl a                   ; X = A * 6
+        sta LSRC
+        asl a
+        clc
+        adc LSRC
+        tax
+        lda fx_table,x
+        sta LSRC
+        lda fx_table+1,x
+        sta LSRC+1
+        stz LDST
+        lda #>OVL
+        sta LDST+1
+        lda fx_table+2,x        ; pages = size high byte, plus one if the
+        cmp #1                  ; low byte isn't 0
+        lda fx_table+3,x
+        adc #0
+        tax
+        jmp aux_fetch
+
+.segment "LCCODE"
+; aux_fetch: copy X pages from aux memory at LSRC to main memory at LDST.
+; It runs from language-card RAM because while RAMRD is on, the CPU would
+; fetch its own instructions from aux too if they were in $0200-$BFFF.
+aux_fetch:
+        sta RDCARDRAM
+        ldy #0
+@copy:  lda (LSRC),y
+        sta (LDST),y
+        iny
+        bne @copy
+        inc LSRC+1
+        inc LDST+1
+        dex
+        bne @copy
+        sta RDMAINRAM
+        rts

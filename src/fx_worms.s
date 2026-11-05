@@ -49,7 +49,9 @@ K     = FXZ+12
 T0    = FXZ+13
 RP    = FXZ+14          ; 2: row pointer
 
-.segment "CODE"
+.segment "FX4"
+        jmp fx_worms_init        ; the overlay's entry points
+        jmp fx_worms_step
 
 wrm_count:
         .byte NWORM

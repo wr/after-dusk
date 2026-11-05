@@ -1,5 +1,6 @@
 import pytest
 
+from fxcommon import NFX
 from sim import DISP, PAGE1, PAGE2, RNG, SEED, ST_BEAT, ST_FX, ST_STARTS, ST_TIMING, TICKS, Sim
 
 FX_TICKS = 10800
@@ -7,7 +8,7 @@ FX_TICKS = 10800
 
 @pytest.fixture
 def s(built):
-    s = Sim()
+    s = Sim().load_effects()
     s.poke(ST_TIMING, 0)       # no vertical blank in the simulator
     return s
 
@@ -25,7 +26,7 @@ def picks(s, n, start=0xFF):
 def test_pick_never_repeats(s):
     s.poke16(RNG, 0x7A31)
     seq = picks(s, 2000)
-    assert set(seq) == set(range(6))
+    assert set(seq) == set(range(NFX))
     assert all(a != b for a, b in zip(seq, seq[1:]))
 
 
@@ -40,8 +41,8 @@ def test_seed_changes_order(s):
 
 def test_fx_table(s):
     base = s.addr("fx_table")
-    wipes = [s.peek(base + i * 6 + 4) for i in range(6)]
-    ticks = [s.peek(base + i * 6 + 5) for i in range(6)]
+    wipes = [s.peek(base + i * 6 + 4) for i in range(NFX)]
+    ticks = [s.peek(base + i * 6 + 5) for i in range(NFX)]
     assert wipes == [1, 1, 1, 0, 0, 1]
     assert ticks == [4, 2, 4, 3, 3, 3]
 
@@ -76,7 +77,7 @@ def test_begin_effect(s):
     s.poke(ST_FX, 0xFF)
     s.poke(ST_STARTS, 7)
     s.call("begin_effect", max_cycles=2_000_000)
-    assert s.peek(ST_FX) in range(6)
+    assert s.peek(ST_FX) in range(NFX)
     assert s.peek(ST_STARTS) == 8
     assert s.peek16(TICKS) == 0
 
@@ -109,7 +110,7 @@ def test_key_ends_effect(s):
     assert s.carry()
 
 
-@pytest.mark.parametrize("fx", range(6))
+@pytest.mark.parametrize("fx", range(NFX))
 def test_fallback_pacing(built, fx):
     """Without vertical blank, a step (work plus wait) still takes about its
     ticks, and TICKS still counts its ticks."""

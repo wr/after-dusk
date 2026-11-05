@@ -15,12 +15,14 @@ def test_catalog(built):
     assert entries.get("HELLO") == "A"
     assert entries.get("AFTERDUSK") == "B"
     assert entries.get("SEED") == "T"
+    assert entries.get("FX") == "B"
 
 
 def test_load_address_and_size(built):
     assert labels()["start"] == 0x6000
     assert "restart" in labels()
-    assert (built / "afterdusk.bin").stat().st_size <= 13824
+    assert (built / "afterdusk.bin").stat().st_size <= 0x2800    # $6000-$87FF
+    assert (built / "fx.bin").stat().st_size <= 0x4000           # $2000-$5FFF
 
 
 def test_no_speaker_refs():

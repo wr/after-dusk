@@ -32,7 +32,9 @@ lis_n     = lis_ph + 2          ; 2: steps since the jump was picked
 NX   = FXZ                      ; 2: the new point
 NY   = FXZ+2
 
-.segment "CODE"
+.segment "FX5"
+        jmp fx_liss_init        ; the overlay's entry points
+        jmp fx_liss_step
 
 ; ================================================================ init
 fx_liss_init:

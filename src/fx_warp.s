@@ -47,7 +47,9 @@ BIG  = FXZ+3
 PTR  = FXZ+5                    ; 2
 MASK = FXZ+7
 
-.segment "CODE"
+.segment "FX1"
+        jmp fx_warp_init        ; the overlay's entry points
+        jmp fx_warp_step
 
 wrp_count:
         .byte NSTARS

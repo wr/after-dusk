@@ -72,7 +72,9 @@ QL    = FXZ+43
 QH    = FXZ+44
 REM   = FXZ+45
 
-.segment "CODE"
+.segment "FX3"
+        jmp fx_zot_init        ; the overlay's entry points
+        jmp fx_zot_step
 
 ; ================================================================ init
 fx_zot_init:

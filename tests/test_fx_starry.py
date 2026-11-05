@@ -49,7 +49,8 @@ def test_stays_in_bounds(built):
 
 def test_init_time(built):
     for seed in (0x1111, 0x2468, 0xACE1):
-        s = Sim()
+        s = Sim().load_effects()
+        s.call("load_fx", a=FX)
         s.mem.ram[0xFFFA:0x10000] = bytes(6)
         s.poke16(0x20, seed)
         cycles = s.call("fx_starry_init", max_cycles=3_000_000)
@@ -133,7 +134,8 @@ def test_near_wrap(s):
 @pytest.mark.parametrize("seed", [0xBB9C, 0x634A])
 def test_big_city_keeps_all_windows(built, seed):
     """A tall, wide city has more than 800 windows; every one is kept."""
-    s = Sim()
+    s = Sim().load_effects()
+    s.call("load_fx", a=FX)
     s.poke16(0x20, seed)
     s.call("fx_starry_init", max_cycles=3_000_000)
     w = windows(s)

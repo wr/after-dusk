@@ -27,7 +27,7 @@ T.run(function()
     if starts() ~= prev then
       local fx = T.peek(T.ST_FX)
       if fx == last then repeats = repeats + 1 end
-      T.check(fx <= 5, "effect id out of range: " .. fx)
+      T.check(fx < T.peek(T.label("fx_count")), "effect id out of range: " .. fx)
       last, prev = fx, starts()
     end
   end

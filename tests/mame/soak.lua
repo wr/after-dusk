@@ -6,6 +6,7 @@ local T = dofile("tests/mame/lib.lua")
 local HOURS = tonumber(os.getenv("AD_SOAK_HOURS") or "8")
 T.run(function()
   T.wait_started()
+  local NFX = T.peek(T.label("fx_count"))
   local seen, starts, first_frame, last_frame = {}, 0, nil, nil
   local prev_st, last_fx, repeats = T.peek(T.ST_STARTS), T.peek(T.ST_FX), 0
   local minutes = math.floor(HOURS * 60)
@@ -28,11 +29,11 @@ T.run(function()
       end
     end
     if not T.check(T.peek16(T.ST_BEAT) ~= b, "stopped at minute " .. m) then break end
-    if not T.check(T.peek(T.ST_FX) <= 5, "bad effect id at minute " .. m) then break end
+    if not T.check(T.peek(T.ST_FX) < NFX, "bad effect id at minute " .. m) then break end
     if not T.check(T.hires_on(), "hi-res off at minute " .. m) then break end
     if T.failed then break end
   end
-  for i = 0, 5 do T.check(seen[i], "effect " .. i .. " never appeared") end
+  for i = 0, NFX - 1 do T.check(seen[i], "effect " .. i .. " never appeared") end
   T.check(repeats == 0, repeats .. " back-to-back repeats")
   if starts >= 2 then
     local avg = (last_frame - first_frame) / (starts - 1) / 60

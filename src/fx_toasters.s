@@ -46,7 +46,9 @@ TMP     = FXZ+2                 ; 2
 TMP2    = FXZ+4                 ; 2
 SPR     = FXZ+6
 
-.segment "CODE"
+.segment "FX0"
+        jmp fx_toasters_init        ; the overlay's entry points
+        jmp fx_toasters_step
 
 tst_count:
         .byte NOBJ

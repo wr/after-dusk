@@ -35,8 +35,10 @@ for src in src/main.s $(ls src/*.s | grep -v '^src/main.s$'); do
 done
 ld65 -C after-dusk.cfg -Ln build/afterdusk.lbl -m build/afterdusk.map -o build/afterdusk.bin "${objs[@]}"
 
+# The linker writes the resident program and build/fx.bin (every effect, for
+# $2000) and refuses anything that outgrows its area (after-dusk.cfg).
 size=$(wc -c < build/afterdusk.bin | tr -d ' ')
-[ "$size" -le 13824 ] || { echo "program is $size bytes; the limit is 13824 (\$6000-\$95FF)" >&2; exit 1; }
+fxsize=$(wc -c < build/fx.bin | tr -d ' ')
 
 "$TOK" < basic/hello.bas > "$OBJ/HELLO.tok"
 printf '\xb0\x8d' > "$OBJ/SEED.txt"           # "0" + Return, high-bit ASCII
@@ -46,6 +48,7 @@ cp "$BASE" "$OUT"
 "$DOS33" -y "$OUT" DELETE HELLO >/dev/null
 "$DOS33" -y "$OUT" SAVE A "$OBJ/HELLO.tok" HELLO >/dev/null
 "$DOS33" -y -a 0x6000 "$OUT" BSAVE build/afterdusk.bin AFTERDUSK >/dev/null
+"$DOS33" -y -a 0x2000 "$OUT" BSAVE build/fx.bin FX >/dev/null
 "$DOS33" -y "$OUT" SAVE T "$OBJ/SEED.txt" SEED >/dev/null
 test "$(wc -c < "$OUT" | tr -d ' ')" = 143360
-echo "built $OUT ($size bytes of program, FX_TICKS=$FX_TICKS)"
+echo "built $OUT ($size bytes of program, $fxsize of effects, FX_TICKS=$FX_TICKS)"

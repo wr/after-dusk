@@ -54,7 +54,9 @@ OK    = FXZ+22
 DPTR  = FXZ+23          ; 2: for getdot
 DMSK  = FXZ+25
 
-.segment "CODE"
+.segment "FX2"
+        jmp fx_starry_init        ; the overlay's entry points
+        jmp fx_starry_step
 
 ; ================================================================ init
 fx_starry_init:
