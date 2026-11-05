@@ -1,19 +1,26 @@
 ; Effect 4: Can of Worms. Six worms wander over whatever is on the screen
-; and eat it: each step a worm's head clears a disc and draws a smaller one
-; (which gives the body its segmented look), and its tail clears a disc to
-; black, leaving an eaten path.
+; and eat it. They crawl at the original's pace: each step a worm's head
+; moves half a dot across (0.43 down), about 10 dots a second, turning up to
+; 0.15 radians, and draws its disc there. Every fourth move (every 2 dots)
+; the head first clears a bigger disc, which cuts a dark ring into the body
+; behind it and gives the body its segmented look. A worm is 18-28 rings
+; long. Its tail follows the rings smoothly, a quarter of the way to the
+; next one each step, clearing a disc to black and leaving an eaten path;
+; the ring three ahead of the tail is drawn whole again, a rounded tail end.
 
 .include "config.inc"
 
 .export fx_worms_init, fx_worms_step
-.export wrm_count, wrm_xi, wrm_xh, wrm_yi, wrm_head
+.export wrm_count, wrm_xf, wrm_xi, wrm_xh, wrm_yf, wrm_yi, wrm_a, wrm_len, wrm_head
+.export ring_xl, ring_xh, ring_y
 
 .import rng_next, rng_below, vbl_poll
 .import row_lo, row_hi, xbyte_lo, xmod_lo, xbyte_hi, xmod_hi
 .import wvx_lo, wvx_hi, wvy_lo, wvy_hi
 
 NWORM = 6
-RING  = 32                      ; positions remembered per worm (>= longest + 3)
+RING  = 32                      ; rings remembered per worm (>= longest + 3)
+EVERY = 4                       ; moves between rings
 
 ; ---- state in FXRAM ----
 wrm_xf   = FXRAM                ; head x: xh:xi.xf
@@ -22,11 +29,11 @@ wrm_xh   = wrm_xi + NWORM
 wrm_yf   = wrm_xh + NWORM       ; head y: yi.yf
 wrm_yi   = wrm_yf + NWORM
 wrm_a    = wrm_yi + NWORM       ; heading, 256 = a full turn
-wrm_len  = wrm_a + NWORM        ; 18-28 segments
-wrm_head = wrm_len + NWORM      ; ring slot of the newest position
-wrm_cnt  = wrm_head + NWORM     ; positions in the ring
-ring_xl  = wrm_cnt + NWORM      ; NWORM x RING: x lo, x hi, y
-ring_xh  = ring_xl + NWORM * RING
+wrm_len  = wrm_a + NWORM        ; 18-28 rings
+wrm_head = wrm_len + NWORM      ; ring slot of the newest ring
+wrm_m    = wrm_head + NWORM     ; moves since the newest ring, 0-3
+ring_xl  = wrm_m + NWORM        ; NWORM x RING: x lo, x hi, y; every slot
+ring_xh  = ring_xl + NWORM * RING ; starts at the worm's first position
 ring_y   = ring_xh + NWORM * RING
 wb0      = ring_y + NWORM * RING ; per half-width 1-3: left byte, its mask,
 wm0      = wb0 + 3              ; right byte, its mask (0 if the same byte)
@@ -48,6 +55,10 @@ DDY   = FXZ+11          ; signed row offset
 K     = FXZ+12
 T0    = FXZ+13
 RP    = FXZ+14          ; 2: row pointer
+SL    = FXZ+16          ; SH:SL this step's move on one axis, 8.8
+SH    = FXZ+17
+TDX   = FXZ+18          ; tail: the next ring's x (low byte) and y
+TDY   = FXZ+19
 
 .segment "FX4"
         jmp fx_worms_init        ; the overlay's entry points
@@ -74,13 +85,32 @@ fx_worms_init:
         stz wrm_yf,x
         jsr rng_next
         sta wrm_a,x
-        lda #11                 ; 18-28 segments
+        lda #11                 ; 18-28 rings
         jsr rng_below
         clc
         adc #18
         sta wrm_len,x
         stz wrm_head,x
-        stz wrm_cnt,x
+        lda #EVERY-1            ; the first move cuts a ring
+        sta wrm_m,x
+        txa                     ; every ring slot: here, so the tail waits
+        asl a                   ; here while the worm grows
+        asl a
+        asl a
+        asl a
+        asl a
+        tay
+        lda #RING
+        sta K
+:       lda wrm_xi,x
+        sta ring_xl,y
+        lda #0
+        sta ring_xh,y
+        lda wrm_yi,x
+        sta ring_y,y
+        iny
+        dec K
+        bne :-
         dex
         bpl @l
         rts
@@ -99,51 +129,63 @@ fx_worms_step:
         asl a
         asl a
         sta WB
-        lda #25                 ; turn by -12..12 (about 0.3 radians)
+        lda #13                 ; turn by -6..6 (about 0.15 radians)
         jsr rng_below
         sec
-        sbc #12
+        sbc #6
         clc
         adc wrm_a,x
         sta wrm_a,x
         tay
-        clc                     ; candidate x = x + 2 cos(a)
+        lda wvx_lo,y            ; candidate x = x + 0.5 cos(a): a quarter
+        sta SL                  ; of the table's 2 cos(a)
+        lda wvx_hi,y
+        jsr quarter
+        clc
         lda wrm_xf,x
-        adc wvx_lo,y
+        adc SL
         sta NXF
         lda wrm_xi,x
-        adc wvx_hi,y
+        adc SH
         sta NXI
-        lda wvx_hi,y            ; sign-extend the step
-        and #$80
-        beq :+
-        lda #$FF
-:       adc wrm_xh,x
+        lda wrm_xh,x
+        adc SH                  ; SH is the sign extension too
         sta NXH
-        clc                     ; candidate y = y + 1.7 sin(a)
+        lda wvy_lo,y            ; candidate y = y + 0.43 sin(a), a quarter
+        sta SL                  ; of 1.7 sin(a)
+        lda wvy_hi,y
+        jsr quarter
+        clc
         lda wrm_yf,x
-        adc wvy_lo,y
+        adc SL
         sta NYF
         lda wrm_yi,x
-        adc wvy_hi,y
+        adc SH
         sta NYI
 
         jsr in_bounds           ; within 4 dots of an edge? turn back instead
         bcs :+
         jmp @turn
 :
-
         lda NXF                 ; move
         sta wrm_xf,x
         lda NXI
         sta wrm_xi,x
+        sta DCX
         lda NXH
         sta wrm_xh,x
+        sta DCX+1
         lda NYF
         sta wrm_yf,x
         lda NYI
         sta wrm_yi,x
-        lda wrm_head,x          ; remember it in the ring
+        sta DCY
+        inc wrm_m,x             ; every fourth move, a ring: remember it,
+        lda wrm_m,x             ; and clear a disc round the head first
+        cmp #EVERY
+        bcc @head
+        stz wrm_m,x
+        lda wrm_head,x
         inc a
         and #RING-1
         sta wrm_head,x
@@ -152,50 +194,33 @@ fx_worms_step:
         tay
         lda NXI
         sta ring_xl,y
-        sta DCX
         lda NXH
         sta ring_xh,y
-        sta DCX+1
         lda NYI
         sta ring_y,y
-        sta DCY
-        inc wrm_cnt,x
-        lda #3                  ; head: a dark ring around a lit disc
         stz PCOL
+        lda #3
         jsr fdisc
-        lda #1
+@head:  lda #1                  ; the head's disc
         sta PCOL
         lda #2
         jsr fdisc
 
-        ldx W                   ; tail: once longer than its length, eat
-        lda wrm_cnt,x
-        cmp wrm_len,x
-        beq @next
-        bcc @next
-        dec wrm_cnt,x
-        lda wrm_head,x          ; oldest = head - len
-        sec
-        sbc wrm_len,x
-        jsr ring_pos
-        stz PCOL
+        jsr tail_pos            ; tail: eat, then draw the ring three ahead
+        stz PCOL                ; whole again
         lda #3
         jsr fdisc
-        lda #3                  ; redraw the three oldest that remain
-        sta K
-@redo:  ldx W
+        ldx W
         lda wrm_head,x
         sec
         sbc wrm_len,x
         clc
-        adc K
+        adc #3
         jsr ring_pos
         lda #1
         sta PCOL
         lda #2
         jsr fdisc
-        dec K
-        bne @redo
         bra @next
 
 @turn:  lda #65                 ; turn back by 90-180 degrees
@@ -212,6 +237,84 @@ fx_worms_step:
         beq :+
         jmp @worm
 :       rts
+
+; tail_pos: DCX/DCY = worm W's tail: wrm_m quarters of the way from its
+; oldest ring (len rings behind the head) to the next one.
+tail_pos:
+        ldx W
+        lda wrm_head,x          ; the next ring
+        sec
+        sbc wrm_len,x
+        inc a
+        jsr ring_pos
+        lda DCX                 ; (rings are 1-3 dots apart, so the low
+        sta TDX                 ; bytes' difference is enough)
+        lda DCY
+        sta TDY
+        ldx W
+        lda wrm_head,x          ; the oldest
+        sec
+        sbc wrm_len,x
+        jsr ring_pos
+        sec
+        lda TDX
+        sbc DCX
+        jsr part
+        pha
+        clc
+        adc DCX
+        sta DCX
+        pla
+        bmi :+
+        lda #0
+        bra :++
+:       lda #$FF
+:       adc DCX+1
+        sta DCX+1
+        sec
+        lda TDY
+        sbc DCY
+        jsr part
+        clc
+        adc DCY
+        sta DCY
+        rts
+
+; part: A = A * wrm_m / 4, rounded; A signed, -4..4.
+part:   sta T0
+        ldx W
+        ldy wrm_m,x
+        lda #2                  ; rounding
+        cpy #0
+        beq @sh
+:       clc
+        adc T0
+        dey
+        bne :-
+@sh:    cmp #$80                ; / 4, keeping the sign
+        ror a
+        cmp #$80
+        ror a
+        rts
+
+; quarter: SH:SL = (A:SL) / 4, signed and rounded. A table step is at most
+; 2 dots, so SH comes out 0 or $FF. Keeps X and Y.
+quarter:
+        pha
+        clc
+        lda SL
+        adc #2
+        sta SL
+        pla
+        adc #0
+        cmp #$80                ; shift right twice, keeping the sign
+        ror a
+        ror SL
+        cmp #$80
+        ror a
+        ror SL
+        sta SH
+        rts
 
 ; in_bounds: carry set if the candidate NXH:NXI, NYI is at least 4 dots
 ; from every edge (x 4-275, y 4-187)
