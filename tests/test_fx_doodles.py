@@ -9,7 +9,7 @@ FX = 9
 W, H = 280, 192
 PTS = 41                        # points in a doodle, joined by 40 segments
 PER = 10                        # steps a doodle takes: 4 segments a step
-HOLD = 75                       # steps a full grid stays up
+HOLD = 30                       # steps a full grid stays up: 1 second, as in the original
 DRAW, HOLDING, CLEARING = 0, 1, 2
 TICKS = 2
 
@@ -217,7 +217,7 @@ def test_full_grid_holds_then_clears_and_a_new_grid_starts(built):
     assert any(s.page_bytes(PAGE1))
     s.fill_page(PAGE1, 0x55)                           # so any change shows, on every row
     picture = [row_bytes(s, y) for y in range(H)]
-    for _ in range(HOLD):                              # 2.5 seconds with nothing moving
+    for _ in range(HOLD):                              # 1 second with nothing moving
         s.step()
         assert [row_bytes(s, y) for y in range(H)] == picture
     steps, top = 0, 0

@@ -6,9 +6,9 @@
 ;   x = cx + ax (0.63 sin(f0 t + q0) + 0.37 sin(f1 t + q1))
 ;   y = cy + ay (0.63 sin(f2 t + q2) + 0.37 sin(f3 t + q3))
 ; f0, f2 1-3, f1, f3 2-5, q random, (cx, cy) the cell's centre, ax 0.34 of the
-; cell's width, ay 0.38 of its height. A full grid stays up for 75 steps; then
-; the screen is cleared 16 rows a step from the top, and a new grid starts.
-; Drawn straight onto page 1.
+; cell's width, ay 0.38 of its height. A full grid stays up for 30 steps (a
+; second, as in the original); then the screen is cleared 16 rows a step from
+; the top, and a new grid starts. Drawn straight onto page 1.
 
 .include "config.inc"
 
@@ -19,7 +19,7 @@
 .import rng_next, rng_below, fline, show_page1, row_lo, row_hi
 
 PTS      = 41                   ; points in a doodle
-HOLD     = 75                   ; steps a full grid stays up
+HOLD     = 30                   ; steps a full grid stays up
 BAND     = 16                   ; rows cleared a step (192 / 16 = 12 steps)
 DT_MIN   = 1229                 ; t's step a point, 1/65536 of a turn: 40 of
 DT_SPAN  = 205                  ; them make 0.75 of a turn, plus 2 * (0-204) + 0-1
@@ -82,7 +82,7 @@ fx_doodles_step:
         cmp #HOLDING
         beq @hold
         jmp clear_band
-@hold:  inc dd_hold             ; the 76th step starts clearing
+@hold:  inc dd_hold             ; the 31st step starts clearing
         lda dd_hold
         cmp #HOLD+1
         bcc @done
