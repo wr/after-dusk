@@ -272,3 +272,91 @@ def test_fline_counts_blanks_on_long_lines(built):
     crossed = s.mpu.processorCycles // 17030 - first
     assert crossed >= 5
     assert crossed - 1 <= s.peek16(FRAMES) <= crossed
+
+
+# ---- pspan: a run filled with a grey dot pattern ----
+
+BAYER = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5]
+OPAQUE, SEE_THROUGH = 0, 1
+
+
+def grey(x, y, level):
+    """The 4 x 4 ordered dither: level 0-16 lights that many of every 16 dots."""
+    return BAYER[(y & 3) * 4 + (x & 3)] < level
+
+
+def pspan(s, x0, x1, y, level, mode, page=PAGE1):
+    s.set_point(x0, y)
+    s.set_point(x1, y, PX2, PY2)
+    return s.call("pspan", a=level, zp={PCOL: mode, PAGE: page})
+
+
+def scribble(s, seed, page=PAGE1):
+    import random
+    rnd = random.Random(seed)
+    base = page << 8
+    for a in range(base, base + 0x2000):
+        s.poke(a, rnd.randrange(0x80))
+
+
+@pytest.mark.parametrize("level", range(17))
+def test_pspan_grey_is_the_4x4_ordered_dither(s, level):
+    for y in range(100, 104):
+        pspan(s, 0, 279, y, level, OPAQUE)
+    want = {(x, y) for y in range(100, 104) for x in range(280) if grey(x, y, level)}
+    assert s.page_pixels() == want
+    for bx in range(0, 280, 4):                    # level dots lit in every 4 x 4 block
+        assert sum((x, y) in want for x in range(bx, bx + 4) for y in range(100, 104)) == level
+
+
+SPANS = [(0, 0, 0), (3, 17, 5), (6, 7, 9), (0, 279, 191), (-5, 4, 2), (270, 300, 3), (13, 13, 100),
+         (7, 13, 6), (8, 40, 7), (-40, 400, 50), (20, 27, 11), (21, 28, 12)]
+
+
+@pytest.mark.parametrize("x0,x1,y", SPANS)
+@pytest.mark.parametrize("level", [0, 1, 6, 11, 16])
+def test_pspan_opaque_sets_and_clears_every_dot_by_the_pattern(s, x0, x1, y, level):
+    scribble(s, x0 * 7 + y)
+    before = s.page_pixels()
+    pspan(s, x0, x1, y, level, OPAQUE)
+    run = {(x, y) for x in range(max(0, x0), min(279, x1) + 1)}
+    lit = {p for p in run if grey(*p, level)}
+    assert s.page_pixels() == (before - run) | lit
+    assert all(b & 0x80 == 0 for b in s.page_bytes(PAGE1))
+
+
+@pytest.mark.parametrize("x0,x1,y", SPANS)
+@pytest.mark.parametrize("level", [0, 2, 9, 16])
+def test_pspan_see_through_only_sets_the_lit_dots(s, x0, x1, y, level):
+    scribble(s, x0 * 5 + y)
+    before = s.page_pixels()
+    pspan(s, x0, x1, y, level, SEE_THROUGH)
+    run = {(x, y) for x in range(max(0, x0), min(279, x1) + 1)}
+    assert s.page_pixels() == before | {p for p in run if grey(*p, level)}
+    assert all(b & 0x80 == 0 for b in s.page_bytes(PAGE1))
+
+
+def test_pspan_off_screen_or_empty_draws_nothing(s):
+    for x0, x1, y in [(-9, -1, 5), (280, 290, 5), (10, 20, 192), (10, 20, -1), (20, 10, 5), (0, 279, 300)]:
+        pspan(s, x0, x1, y, 16, OPAQUE)
+    assert s.page_pixels() == set()
+    assert s.page_bytes(PAGE2) == bytes(0x2000)
+
+
+def test_pspan_page2(s):
+    pspan(s, 0, 279, 191, 8, OPAQUE, PAGE2)
+    assert s.page_pixels(PAGE1) == set()
+    assert s.page_pixels(PAGE2) == {(x, 191) for x in range(280) if grey(x, 191, 8)}
+
+
+def test_pspan_keeps_its_ends(s):
+    pspan(s, -20, 300, 40, 5, OPAQUE)
+    assert (s.peek16(0x10), s.peek16(0x12), s.peek16(PX2)) == (0x10000 - 20, 40, 300)
+
+
+def test_pspan_is_quick(s):
+    """About 250 cycles a run plus 17 a byte (opaque) or 21 (see-through): Spheres and
+    Shapes draw a run for every row of every shape."""
+    assert pspan(s, 0, 279, 77, 9, OPAQUE) < 1_000
+    assert pspan(s, 0, 279, 78, 9, SEE_THROUGH) < 1_150
+    assert pspan(s, 100, 103, 79, 9, OPAQUE) < 260

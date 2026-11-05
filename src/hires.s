@@ -6,7 +6,7 @@
 .include "config.inc"
 
 .export plot, line, fline, disc, clear_page, fill_page, invert_page, copy_page
-.export show_page1, show_page2, wipe_to_black, hspan
+.export show_page1, show_page2, wipe_to_black, hspan, pspan
 .import wait_ticks, vbl_poll
 .export row_lo, row_hi, xbyte_lo, xbit_lo, xbyte_hi, xbit_hi, xmod_lo, xmod_hi
 .export wvx_lo, wvx_hi, wvy_lo, wvy_hi, lsx, lsy, make_tables
@@ -32,13 +32,16 @@ FERR  = DSX+4         ; 2
 FCNT  = DSX+6         ; 2: dots left
 FPG   = DSX+8         ; $00 for page 1, $60 for page 2
 
-; hspan
-HL    = DSX           ; 2: left end, clipped
-HR    = DSX+2         ; 2: right end, clipped
-HB0   = DSX+4         ; first byte
-HB1   = DSX+5         ; last byte
-HM0   = DSX+6         ; its mask
-HM1   = DSX+7
+; hspan, pspan
+HB0   = DSX           ; first byte
+HB1   = DSX+1         ; last byte
+HM0   = DSX+2         ; its dots
+HM1   = DSX+3
+
+; pspan
+GL    = DSX+8         ; grey level
+GP    = DSX+9         ; 4: the row's pattern bytes, by the first dot's x & 3
+GM    = DSX+13        ; 4 x the grey level
 
 ; disc
 CX    = DSX           ; 2: centre
@@ -524,72 +527,8 @@ squares:
 ; clipped to the screen; nothing when PX2 < PX. A byte at a time, so a run
 ; costs about as much as two or three dots. PX/PX2/PY are left unchanged.
 hspan:
-        lda PY+1
-        bne @out
-        ldy PY
-        cpy #192
-        bcs @out
-        lda PX                  ; HL = max(PX, 0)
-        sta HL
-        lda PX+1
-        sta HL+1
-        bpl :+
-        stz HL
-        stz HL+1
-:       lda PX2                 ; HR = min(PX2, 279)
-        sta HR
-        lda PX2+1
-        sta HR+1
-        bmi @out
-        beq @rok
-        cmp #1
-        bne @rclip
-        lda HR
-        cmp #24
-        bcc @rok
-@rclip: lda #<279
-        sta HR
-        lda #>279
-        sta HR+1
-@rok:   lda HR+1                ; empty?
-        cmp HL+1
-        bcc @out
-        bne @go
-        lda HR
-        cmp HL
-        bcs @go
-@out:   rts
-@go:    lda row_lo,y
-        sta PTR
-        lda PAGE
-        eor #$20
-        eor row_hi,y
-        sta PTR+1
-        ldx HL                  ; first byte and the dots from HL rightwards
-        lda HL+1
-        bne :+
-        lda xbyte_lo,x
-        sta HB0
-        ldy xmod_lo,x
-        bra :++
-:       lda xbyte_hi,x
-        sta HB0
-        ldy xmod_hi,x
-:       lda span_l,y
-        sta HM0
-        ldx HR                  ; last byte and the dots up to HR
-        lda HR+1
-        bne :+
-        lda xbyte_lo,x
-        sta HB1
-        ldy xmod_lo,x
-        bra :++
-:       lda xbyte_hi,x
-        sta HB1
-        ldy xmod_hi,x
-:       lda span_r,y
-        sta HM1
-        ldy HB0
+        jsr span_setup
+        bcs span_out
         cpy HB1
         bne @wide
         lda HM0
@@ -621,10 +560,271 @@ span_apply:
 @clr:   eor #$7F
         and (PTR),y
         sta (PTR),y
+span_out:
+        rts
+
+; span_setup: clip the run PX..PX2 on row PY to the screen. Carry set when
+; nothing is left; otherwise PTR is the row on PAGE, HB0 (also in Y) and HB1
+; the first and last bytes, HM0 and HM1 the run's dots in each.
+span_setup:
+        ldy PY
+        lda PY+1
+        bne @out
+        cpy #192
+        bcs @out
+        lda row_lo,y
+        sta PTR
+        lda PAGE
+        eor #$20
+        eor row_hi,y
+        sta PTR+1
+        lda PX2+1               ; right end: left of the screen, on it, or
+        bmi @out                ; past it (279)
+        bne @rhi
+        ldx PX2
+        lda xbyte_lo,x
+        ldy xmod_lo,x
+        bra @r
+@rhi:   ldx PX2
+        cmp #1
+        bne @rclip
+        cpx #24
+        bcs @rclip
+        lda xbyte_hi,x
+        ldy xmod_hi,x
+        bra @r
+@rclip: lda #39
+        ldy #6
+@r:     sta HB1
+        lda span_r,y
+        sta HM1
+        lda PX+1                ; left end: before the screen (0), on it, or
+        bmi @lclip              ; past it
+        bne @lhi
+        ldx PX
+        ldy xbyte_lo,x
+        lda xmod_lo,x
+        bra @l
+@lhi:   cmp #1
+        bne @out
+        ldx PX
+        cpx #24
+        bcs @out
+        ldy xbyte_hi,x
+        lda xmod_hi,x
+        bra @l
+@lclip: ldy #0
+        tya
+@l:     sty HB0
+        tax
+        lda span_l,x
+        sta HM0
+        cpy HB1                 ; first byte after the last: nothing (in one
+        beq :+                  ; byte, the two ends' dots have none in common)
+        rts                     ; (carry: set if after)
+:       clc
+        rts
+@out:   sec
         rts
 
 span_l: .byte $7F, $7E, $7C, $78, $70, $60, $40   ; dots m..6
 span_r: .byte $01, $03, $07, $0F, $1F, $3F, $7F   ; dots 0..m
+
+; ---------------------------------------------------------------- pspan
+; A run like hspan's filled with grey level A (0-16), a 4 x 4 ordered
+; dither: dot (x, y) is lit when BAYER[(y & 3) * 4 + (x & 3)] < A, so a
+; level lights that many of every 16 dots. PCOL 1: only the lit dots are set
+; (see-through); otherwise every dot is set or cleared (opaque). About 250
+; cycles a run, plus 17 a byte (opaque) or 21 (see-through). PX/PX2/PY are
+; left unchanged.
+;
+; Bytes hold 7 dots and the pattern repeats every 4, so a byte whose first
+; dot is x has the pattern's 7 dots from x & 3 on; one byte to the right,
+; x & 3 is one less (7 = -1 mod 4). GP holds the row's four such bytes.
+pspan:
+        sta GL
+        jsr span_setup
+        bcc :+
+        rts
+:       lda GL                  ; the row's four dots, twice over
+        asl a
+        asl a
+        sta GM
+        lda PY
+        and #3
+        ora GM
+        tax
+        ldy greys,x             ; and its four pattern bytes
+        lda gexp,y
+        sta GP
+        lda gexp+1,y
+        sta GP+1
+        lda gexp+2,y
+        sta GP+2
+        lda gexp+3,y
+        sta GP+3
+        ldy HB0                 ; X = the first byte's x & 3 = -byte & 3
+        tya
+        eor #$FF
+        inc a
+        and #3
+        tax
+        lda HM0                 ; its dots (if it is also the last, the dots
+        cpy HB1                 ; of both ends)
+        bne :+
+        and HM1
+:       sta MASK
+        lda PCOL
+        cmp #1
+        bne :+
+        jmp pspan_see
+
+:       lda (PTR),y             ; opaque: old ^ ((old ^ pattern) & dots)
+        eor GP,x
+        and MASK
+        eor (PTR),y
+        sta (PTR),y
+        cpy HB1
+        beq @rts
+        iny                     ; whole bytes are the pattern, four at a
+        dex                     ; time from the next byte's phase
+        bpl :+
+        ldx #3
+:       cpy HB1
+        beq @last
+        txa
+        asl a
+        tax
+        jmp (@at,x)
+@at:    .word @p0, @p1, @p2, @p3
+@p3:    lda GP+3
+        sta (PTR),y
+        iny
+        cpy HB1
+        beq @last
+@p2:    lda GP+2
+        sta (PTR),y
+        iny
+        cpy HB1
+        beq @last
+@p1:    lda GP+1
+        sta (PTR),y
+        iny
+        cpy HB1
+        beq @last
+@p0:    lda GP
+        sta (PTR),y
+        iny
+        cpy HB1
+        bne @p3
+@last:  jsr pspan_last
+        lda (PTR),y
+        eor GP,x
+        and MASK
+        eor (PTR),y
+        sta (PTR),y
+@rts:   rts
+
+pspan_see:
+        lda GP,x                ; see-through: old | (pattern & dots)
+        and MASK
+        ora (PTR),y
+        sta (PTR),y
+        cpy HB1
+        beq @rts
+        iny
+        dex
+        bpl :+
+        ldx #3
+:       cpy HB1
+        beq @last
+        txa
+        asl a
+        tax
+        jmp (@at,x)
+@at:    .word @p0, @p1, @p2, @p3
+@p3:    lda GP+3
+        ora (PTR),y
+        sta (PTR),y
+        iny
+        cpy HB1
+        beq @last
+@p2:    lda GP+2
+        ora (PTR),y
+        sta (PTR),y
+        iny
+        cpy HB1
+        beq @last
+@p1:    lda GP+1
+        ora (PTR),y
+        sta (PTR),y
+        iny
+        cpy HB1
+        beq @last
+@p0:    lda GP
+        ora (PTR),y
+        sta (PTR),y
+        iny
+        cpy HB1
+        bne @p3
+@last:  jsr pspan_last
+        lda GP,x
+        and MASK
+        ora (PTR),y
+        sta (PTR),y
+@rts:   rts
+
+; pspan_last: X = the phase of the last byte (Y), MASK = its dots.
+pspan_last:
+        tya
+        eor #$FF
+        inc a
+        and #3
+        tax
+        lda HM1
+        sta MASK
+        rts
+
+; greys: for each level 0-16 and row r = y & 3, 4 x the row's four dots m,
+; dot i of 4 in bit i: lit when BAYER[4r + i] < level, with
+; BAYER = 0 8 2 10 / 12 4 14 6 / 3 11 1 9 / 15 7 13 5.
+greys:
+        .byte $00, $00, $00, $00   ; 0
+        .byte $04, $00, $00, $00   ; 1
+        .byte $04, $00, $10, $00   ; 2
+        .byte $14, $00, $10, $00   ; 3
+        .byte $14, $00, $14, $00   ; 4
+        .byte $14, $08, $14, $00   ; 5
+        .byte $14, $08, $14, $20   ; 6
+        .byte $14, $28, $14, $20   ; 7
+        .byte $14, $28, $14, $28   ; 8
+        .byte $1C, $28, $14, $28   ; 9
+        .byte $1C, $28, $34, $28   ; 10
+        .byte $3C, $28, $34, $28   ; 11
+        .byte $3C, $28, $3C, $28   ; 12
+        .byte $3C, $2C, $3C, $28   ; 13
+        .byte $3C, $2C, $3C, $38   ; 14
+        .byte $3C, $3C, $3C, $38   ; 15
+        .byte $3C, $3C, $3C, $3C   ; 16
+; gexp: for each m, the four pattern bytes: byte p is the dots of m
+; repeated, from dot p on (bits p to p + 6 of m + 16 m + 256 m).
+gexp:
+        .byte $00, $00, $00, $00
+        .byte $11, $08, $44, $22
+        .byte $22, $11, $08, $44
+        .byte $33, $19, $4C, $66
+        .byte $44, $22, $11, $08
+        .byte $55, $2A, $55, $2A
+        .byte $66, $33, $19, $4C
+        .byte $77, $3B, $5D, $6E
+        .byte $08, $44, $22, $11
+        .byte $19, $4C, $66, $33
+        .byte $2A, $55, $2A, $55
+        .byte $3B, $5D, $6E, $77
+        .byte $4C, $66, $33, $19
+        .byte $5D, $6E, $77, $3B
+        .byte $6E, $77, $3B, $5D
+        .byte $7F, $7F, $7F, $7F
 
 ; ---------------------------------------------------------------- pages
 ; clear_page: zero the 8K page at PAGE. fill_page: fill it with A.
