@@ -1,3 +1,5 @@
+import math
+
 import pytest
 
 from fxcommon import TICK, check_bit7, check_budget, check_in_bounds, run, start
@@ -7,15 +9,24 @@ FRAMES = 0x2C                   # timing.s: vertical blanks counted
 
 FX = 6
 KEEP = 20                       # generations kept, 4 lines each
-W, H = 140, 96                  # the top-left quarter the two ends stay in
-VMAX_X, VMAX_Y = 4.0, 3.0       # speed limits, dots a step
-PUSH_X, PUSH_Y = 1.2, 1.0       # random push a step, at most
-DAMP = 0.9                      # share of the speed kept from one step to the next
+XMAX, YMAX = 279, 191           # the ends bounce off the edges of the whole screen
+XA = 1.1                        # x speeds stretched for the IIc's dot shape
+SPEED = (2.5, 4.5)              # dots a step (x part unstretched)
+START_X, START_Y = (125, 155), (85, 107)
+SEEDS = (0x4D2A, 0x1357, 0xBEEF, 0x2468, 0x0F0F, 0x7777)
 
 LINES = [
     (0, 0, 139, 95), (139, 95, 0, 0), (10, 80, 130, 5), (5, 0, 5, 95), (0, 40, 139, 40),
     (70, 30, 70, 30), (139, 0, 0, 95), (3, 90, 9, 2), (20, 10, 26, 60), (131, 7, 3, 9),
     (6, 50, 7, 51), (0, 95, 139, 94),
+    # across the middle, wider than 140, taller than 96
+    (139, 96, 140, 95), (100, 5, 250, 180), (30, 0, 60, 191), (200, 191, 150, 0),
+    (5, 0, 5, 191), (279, 191, 279, 0), (140, 0, 139, 191), (0, 191, 191, 0),
+    # wider than 255 (and the x tables' seam at 256)
+    (0, 0, 279, 191), (279, 191, 0, 0), (0, 191, 279, 0), (0, 0, 279, 0), (0, 191, 279, 191),
+    (0, 95, 279, 96), (10, 20, 270, 30), (3, 7, 270, 7), (0, 50, 255, 60), (0, 50, 256, 60),
+    (1, 120, 278, 40), (255, 10, 256, 11), (260, 100, 270, 100), (250, 3, 279, 190),
+    (275, 0, 279, 4), (256, 0, 256, 191),
 ]
 
 
@@ -23,21 +34,57 @@ def signed(v):
     return v - 0x10000 if v & 0x8000 else v
 
 
+def end_base(s, e):
+    return s.addr("nl_a") + 10 * e
+
+
+def axis(s, e, ax):
+    """End e's position (8 fraction bits) and speed (signed 8.8) on axis 0 (x) or 1 (y)."""
+    a = end_base(s, e) + 5 * ax
+    return s.peek(a) | s.peek(a + 1) << 8 | s.peek(a + 2) << 16, signed(s.peek16(a + 3))
+
+
+def set_axis(s, e, ax, p, v):
+    a = end_base(s, e) + 5 * ax
+    s.poke(a, p)
+    s.poke(a + 1, p >> 8)
+    s.poke(a + 2, p >> 16)
+    s.poke16(a + 3, v)
+
+
 def ends(s):
     """A and B as (x, y, vx, vy) in dots."""
     out = []
-    for name in ("nl_a", "nl_b"):
-        a = s.addr(name)
-        out.append((s.peek16(a) / 256, s.peek16(a + 2) / 256,
-                    signed(s.peek16(a + 4)) / 256, signed(s.peek16(a + 6)) / 256))
+    for e in (0, 1):
+        (x, vx), (y, vy) = axis(s, e, 0), axis(s, e, 1)
+        out.append((x / 256, y / 256, vx / 256, vy / 256))
     return out
 
 
 def generations(s):
     """The kept generations, oldest first, as (ax, ay, bx, by)."""
     head, count = s.peek(s.addr("nl_head")), s.peek(s.addr("nl_count"))
-    cols = [s.addr(n) for n in ("nl_gax", "nl_gay", "nl_gbx", "nl_gby")]
-    return [tuple(s.peek(c + (head - count + i) % KEEP) for c in cols) for i in range(count)]
+    cols = [s.addr(n) for n in ("nl_gaxl", "nl_gaxh", "nl_gay", "nl_gbxl", "nl_gbxh", "nl_gby")]
+    out = []
+    for i in range(count):
+        k = (head - count + i) % KEEP
+        axl, axh, ay, bxl, bxh, by = (s.peek(c + k) for c in cols)
+        out.append((axl | axh << 8, ay, bxl | bxh << 8, by))
+    return out
+
+
+def set_generations(s, line):
+    for k in range(KEEP):
+        for name, v in zip(("nl_gaxl", "nl_gaxh", "nl_gay", "nl_gbxl", "nl_gbxh", "nl_gby"),
+                           (line[0] & 0xFF, line[0] >> 8, line[1], line[2] & 0xFF, line[2] >> 8,
+                            line[3])):
+            s.poke(s.addr(name) + k, v)
+    s.poke(s.addr("nl_head"), 0)
+    s.poke(s.addr("nl_count"), KEEP)
+
+
+def rounded(x, y):
+    return math.floor(x + 0.5), math.floor(y + 0.5)
 
 
 def ref_line(x0, y0, x1, y1):
@@ -69,14 +116,25 @@ def ref_line(x0, y0, x1, y1):
 
 
 def quad(x0, y0, x1, y1):
-    """A line in the top-left quarter and its three mirror images."""
+    """A line and its three mirror images."""
     return {(mx, my) for x, y in ref_line(x0, y0, x1, y1)
             for mx in (x, 279 - x) for my in (y, 191 - y)}
 
 
 def draw(s, x0, y0, x1, y1, mode=1):
     q = s.addr("nl_q")
-    s.call("quad_line", zp={q: x0, q + 1: y0, q + 2: x1, q + 3: y1, q + 4: mode})
+    return s.call("quad_line", zp={q: x0 & 0xFF, q + 1: x0 >> 8, q + 2: y0,
+                                   q + 3: x1 & 0xFF, q + 4: x1 >> 8, q + 5: y1, q + 6: mode})
+
+
+def moved(p, v, top):
+    """The sample's move for one axis, in fixed point: straight on, or back off an edge."""
+    q = p + v
+    if q < 0:
+        return 0, -v
+    if q > top << 8:
+        return top << 8, -v
+    return q, v
 
 
 @pytest.fixture
@@ -84,31 +142,32 @@ def s(built):
     return start(FX)
 
 
+# ---- budget ----
+
 def test_budget(built):
     worst, median = check_budget(FX)
     print("worst step", worst, "median", median)
 
 
-def test_longest_lines_fit_the_budget(s):
+def test_full_screen_lines_fit_the_budget(s):
     """The slowest step there can be: the oldest generation and the newest both
-    run corner to corner of the quarter (140 dots across, 96 rows)."""
-    for slot, name in enumerate(("nl_gax", "nl_gay", "nl_gbx", "nl_gby")):
-        for i in range(KEEP):
-            s.poke(s.addr(name) + i, (0, 95, 139, 0)[slot])
-    s.poke(s.addr("nl_head"), 0)
-    s.poke(s.addr("nl_count"), KEEP)
-    a, b = s.addr("nl_a"), s.addr("nl_b")
-    for base, x, y, vx, vy in ((a, 0x8B80, 0x0080, 0x0400, -0x0300),    # A into the far corner
-                               (b, 0x0080, 0x5F80, -0x0400, 0x0300)):   # B into the near one
-        s.poke16(base, x)
-        s.poke16(base + 2, y)
-        s.poke16(base + 4, vx)
-        s.poke16(base + 6, vy)
+    run corner to corner of the screen, so 8 lines 280 dots across and 192 rows
+    tall are rubbed out and drawn."""
+    s.fill_page(0x20, 0)
+    draw(s, 0, 191, 279, 0)
+    set_generations(s, (0, 191, 279, 0))
+    set_axis(s, 0, 0, 277 << 8, 3 << 8)         # A into the top-right corner
+    set_axis(s, 0, 1, 1 << 8, -3 << 8)
+    set_axis(s, 1, 0, 2 << 8, -3 << 8)          # B into the bottom-left one
+    set_axis(s, 1, 1, 189 << 8, 3 << 8)
     cycles = s.step()
-    assert generations(s)[-1] == (139, 0, 0, 95)
+    assert generations(s)[-1] == (279, 0, 0, 191)
+    assert s.page_pixels() == quad(279, 0, 0, 191)
     print("longest step", cycles)
-    assert cycles < 5 * 17030 - 300
+    assert cycles < 5 * TICK - 300
 
+
+# ---- drawing ----
 
 def test_stays_in_bounds(built):
     check_bit7(check_in_bounds(FX))
@@ -129,25 +188,8 @@ def test_erasing_a_line_takes_all_of_it(s):
         assert s.page_pixels() == set(), line
 
 
-def test_starts_as_a_cross(built):
-    """One end near the middle, the other near the corner, both still: the first
-    four lines make an X through the middle of the screen."""
-    for seed in (0x1111, 0x2222, 0x3333, 0x4444, 0x5555, 0x6666):
-        s = start(FX, seed=seed)
-        (ax, ay, avx, avy), (bx, by, bvx, bvy) = ends(s)
-        assert 115 <= ax < 139 and 75 <= ay < 95
-        assert 0 <= bx < 20 and 0 <= by < 15
-        assert avx == avy == bvx == bvy == 0
-        s.step()
-        [g] = generations(s)
-        gax, gay, gbx, gby = g
-        assert gax >= 113 and gay >= 73          # one push moves an end 1.2 dots at most
-        assert gbx <= 21 and gby <= 16
-        assert s.page_pixels() == quad(*g)
-
-
-def test_mirrored_left_right_and_top_bottom(s):
-    for n in range(150):
+def test_mirrored_left_right_and_top_bottom_after_every_step(s):
+    for n in range(200):
         s.step()
         lit = s.page_pixels()
         assert {(279 - x, y) for x, y in lit} == lit, n
@@ -159,10 +201,10 @@ def test_keeps_the_last_20_generations(s):
     assert s.peek(s.addr("nl_count")) == KEEP
     gens = generations(s)
     (ax, ay, _, _), (bx, by, _, _) = ends(s)
-    assert gens[-1] == (int(ax), int(ay), int(bx), int(by))   # the newest is where the ends are
+    assert gens[-1] == (*rounded(ax, ay), *rounded(bx, by))   # the newest is where the ends are
 
 
-def test_older_generations_are_gone(s):
+def test_screen_holds_only_the_kept_generations(s):
     for n in (100, 37, 163):
         run(s, n)
         gens = generations(s)
@@ -170,7 +212,6 @@ def test_older_generations_are_gone(s):
         lit = s.page_pixels()
         assert lit <= set().union(*(quad(*g) for g in gens))
         assert quad(*gens[-1]) <= lit                # the newest is drawn whole
-        assert len(lit) <= KEEP * 4 * W
 
 
 def test_newest_generation_is_always_whole(s):
@@ -179,58 +220,18 @@ def test_newest_generation_is_always_whole(s):
         assert quad(*generations(s)[-1]) <= s.page_pixels()
 
 
-def test_ends_stay_in_the_quarter_within_the_speed_limits(built):
-    for seed in (0x4D2A, 0x1357, 0xBEEF):
-        s = start(FX, seed=seed)
-        for _ in range(400):
-            s.step()
-            for x, y, vx, vy in ends(s):
-                assert 0 <= x < W and 0 <= y < H
-                assert abs(vx) <= VMAX_X and abs(vy) <= VMAX_Y
-
-
-def test_speeds_carry_over_with_a_random_push(built):
-    """Each step v = 0.9 v + a push of up to 1.2 dots (x) or 1 dot (y), and the
-    end moves by v: the ends drift in smooth curves rather than jitter."""
-    pushes = {"x": [], "y": []}
-    s = start(FX, seed=0x2468)
-    before = ends(s)
-    for _ in range(500):
-        s.step()
-        after = ends(s)
-        for (x0, y0, vx0, vy0), (x1, y1, vx1, vy1) in zip(before, after):
-            for axis, p0, v0, p1, v1, vmax, edge in (("x", x0, vx0, x1, vx1, VMAX_X, W - 1),
-                                                     ("y", y0, vy0, y1, vy1, VMAX_Y, H - 1)):
-                if p1 in (0, edge):                  # bounced: see the next test
-                    continue
-                assert p1 == p0 + v1
-                if abs(v1) < vmax:                   # not held at the limit
-                    pushes[axis].append(v1 - DAMP * v0)
-        before = after
-    for axis, most in (("x", PUSH_X), ("y", PUSH_Y)):
-        p = pushes[axis]
-        assert len(p) > 600
-        assert max(abs(v) for v in p) <= most + 0.02
-        assert min(p) < -0.8 * most and max(p) > 0.8 * most
-        assert abs(sum(p) / len(p)) < 0.1
-    assert max(abs(v) for v in pushes["x"]) > 1.05   # x pushes go past a dot
-
-
-def test_ends_bounce_off_the_edges(s):
-    a = s.addr("nl_a")
-    cases = [   # offset of the position (0 = x, 2 = y), position and speed (8.8), where it stops
-        (0, 0x8A80, 0x0300, 0x8B00),    # x 138.5 heading right at 3: stops at 139
-        (0, 0x0080, -0x0300, 0x0000),   # x 0.5 heading left: stops at 0
-        (2, 0x5E80, 0x0300, 0x5F00),    # y 94.5 heading down: stops at 95
-        (2, 0x0080, -0x0300, 0x0000),   # y 0.5 heading up: stops at 0
-    ]
-    for off, pos, v, want in cases:
-        s.poke16(a + off, pos)
-        s.poke16(a + 4 + off, v)
-        s.step()
-        assert s.peek16(a + off) == want, (off, pos)
-        v1 = signed(s.peek16(a + 4 + off))
-        assert (v1 < 0) == (v > 0) and v1 != 0, (off, pos, v1)   # turned back
+def test_tall_lines_count_every_blank(s):
+    """A line 192 rows tall takes more than a frame; it counts every vertical
+    blank it works through."""
+    VblLatch(s)
+    s.poke(ST_TIMING, 1)
+    s.poke16(FRAMES, 0)
+    first = s.mpu.processorCycles // TICK
+    for n in range(30):
+        draw(s, 5 + n, 0, 5 + n, 191, mode=n & 1 ^ 1)
+    crossed = s.mpu.processorCycles // TICK - first
+    assert crossed > 30
+    assert crossed - 1 <= s.peek16(FRAMES) <= crossed
 
 
 def test_steps_count_every_blank(built):
@@ -244,3 +245,75 @@ def test_steps_count_every_blank(built):
     crossed = s.mpu.processorCycles // TICK - first
     assert crossed > 100
     assert crossed - 1 <= s.peek16(FRAMES) <= crossed
+
+
+# ---- motion ----
+
+def speed(vx, vy):
+    return math.hypot(vx / XA, vy)
+
+
+def test_ends_start_near_the_middle(built):
+    for seed in SEEDS:
+        s = start(FX, seed=seed)
+        for x, y, vx, vy in ends(s):
+            assert START_X[0] <= x < START_X[1] and START_Y[0] <= y < START_Y[1]
+            assert SPEED[0] <= speed(vx, vy) <= SPEED[1]
+        s.step()
+        [g] = generations(s)
+        (ax, ay, _, _), (bx, by, _, _) = ends(s)
+        assert g == (*rounded(ax, ay), *rounded(bx, by))
+        assert s.page_pixels() == quad(*g)
+
+
+def test_starting_speeds_and_directions_vary(built):
+    speeds, signs, steep = [], set(), set()
+    for seed in range(1, 120):
+        for x, y, vx, vy in ends(start(FX, seed=seed * 0x1F3)):
+            speeds.append(speed(vx, vy))
+            signs.add((vx > 0, vy > 0))
+            steep.add(abs(vy) > abs(vx / XA))
+    assert min(speeds) < 2.7 and max(speeds) > 4.3
+    assert len(signs) == 4 and steep == {True, False}
+
+
+def test_ends_keep_a_steady_velocity_and_bounce_off_every_edge(built):
+    """Each end goes straight on at the speed it started with; where it would
+    cross an edge, it is put back on the edge and that part of its speed turns
+    round. Between them the ends reach all four edges of the screen."""
+    edges = set()
+    for seed in SEEDS[:3]:
+        s = start(FX, seed=seed)
+        before = [[axis(s, e, ax) for ax in (0, 1)] for e in (0, 1)]
+        for vs in before:
+            (x, vx), (y, vy) = vs
+            assert SPEED[0] <= speed(vx / 256, vy / 256) <= SPEED[1]
+        for _ in range(800):
+            s.step()
+            for e in (0, 1):
+                for ax, top in ((0, XMAX), (1, YMAX)):
+                    p0, v0 = before[e][ax]
+                    p1, v1 = axis(s, e, ax)
+                    assert (p1, v1) == moved(p0, v0, top), (seed, e, ax)
+                    assert 0 <= p1 <= top << 8
+                    if v1 != v0:
+                        edges.add((ax, p1 == 0))
+                    before[e][ax] = (p1, v1)
+    assert edges == {(0, True), (0, False), (1, True), (1, False)}
+
+
+@pytest.mark.parametrize("e", [0, 1])
+def test_ends_bounce_off_the_edges(s, e):
+    cases = [   # axis, position and speed (8 fraction bits), where it stops
+        (0, 0x11680, 0x0300, 0x11700),  # x 278.5 heading right at 3: stops at 279
+        (0, 0x0080, -0x0300, 0x0000),   # x 0.5 heading left: stops at 0
+        (1, 0xBE80, 0x0300, 0xBF00),    # y 190.5 heading down: stops at 191
+        (1, 0x0080, -0x0300, 0x0000),   # y 0.5 heading up: stops at 0
+        (0, 0x11400, 0x0300, 0x11700),  # x 276 heading right at 3: on the edge, no bounce yet
+    ]
+    for ax, pos, v, want in cases:
+        set_axis(s, e, ax, pos, v)
+        s.step()
+        p1, v1 = axis(s, e, ax)
+        assert p1 == want, (ax, pos)
+        assert v1 == (v if pos + v == want else -v), (ax, pos, v1)
