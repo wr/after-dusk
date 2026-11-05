@@ -72,7 +72,8 @@ Status block: `$0310` current effect (`$FF` before the first), `$0311` effects s
 `$0312`/`$0313` steps since boot, `$0314` 1 = vertical-blank pacing, `$0315` 1 = IIc Plus.
 
 Effect ids: 0 Flying Toasters, 1 Warp, 2 Starry Night, 3 Zot!, 4 Can of Worms, 5 Lissajous,
-6 Nightlines, 7 String Theory, 8 Rose, 9 Doodles.
+6 Nightlines, 7 String Theory, 8 Rose, 9 Doodles, 10 Shapes, 11 Spheres, 12 Bouncing Ball,
+13 Rainstorm.
 
 Each effect's step must finish inside its ticks on a 1 MHz IIc (`tests/fxcommon.py`
 checks the worst step against `ticks × 17,030 − 300` cycles and the median against 85% of
@@ -91,6 +92,12 @@ frames to a deadline. `tests/mame/pacing.lua` checks every effect's real rate. F
 - String Theory: 2 ribbons of 20 strings at 6 ticks (the original draws 30-35 strings a second
   against 10 steps here, so the ribbons move 2.8-4.2 dots a step to match its speed); its own
   unrolled line routine (`str_line`), about twice as fast as `fline` on long lines.
+- Shapes: sizes capped (height x (width + 161) <= 13,851) so the biggest fills in 3 ticks.
+- Spheres: radius 12-44 (58 was planned) so the biggest circle fills in 4 ticks.
+- Rainstorm: 45 drops (55 were planned) at 3 ticks.
+
+Speeds follow the originals, timed from video of the real After Dark modules (Afterglow);
+where the IIc draws fewer updates a second, each update moves further.
 
 ## Never
 
