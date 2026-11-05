@@ -44,7 +44,7 @@ def test_fx_table(s):
     wipes = [s.peek(base + i * 6 + 4) for i in range(NFX)]
     ticks = [s.peek(base + i * 6 + 5) for i in range(NFX)]
     assert wipes == [1, 1, 1, 0, 0, 1, 1, 1, 1, 1]
-    assert ticks == [4, 2, 4, 3, 3, 3, 5, 5, 2, 2]
+    assert ticks == [4, 2, 4, 3, 3, 3, 5, 6, 2, 2]
 
 
 def test_normalize_display(s):
@@ -119,9 +119,7 @@ def test_fallback_pacing(built, fx):
     s = fx_start(fx)
     s.poke(0x2B, fx * 6)                  # FXOFF: the randomizer's current effect
     ticks = fx_entry(s, fx)[3]
-    # settle: worms only eat once their tails start; String Theory's ribbons
-    # only start rubbing out once they hold 56 strings
-    for _ in range(70 if fx == 7 else 40):
+    for _ in range(40):                   # settle (worms only eat once their tails start)
         s.step()
     periods = []
     for _ in range(24):

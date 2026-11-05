@@ -7,11 +7,13 @@ from fxcommon import ALLOWED, OVERHEAD, TICK, check_bit7, check_budget, check_in
 from sim import PAGE1, ST_TIMING, VblLatch
 
 FX = 7
-KEEP = 56                       # strings kept per ribbon
-RING = 64                       # ring slots per ribbon
+KEEP = 24                       # strings kept per ribbon
+RING = 32                       # ring slots per ribbon
 PERIM = 2 * (279 + 191)         # 940: the screen's edge, clockwise from the top-left corner
-V_MIN, V_MAX = 96, 256          # speed limits, 8.8 (0.375-1.0 dots a step)
-PH_STEP = 52                    # phase per step, 65536 = a full turn (0.005 radians)
+SWING = 0.3                     # far end: s + PERIM (0.5 + 0.3 sin ph)
+V_MIN, V_MAX = 307, 614         # speed limits, 8.8 (1.2-2.4 dots a step)
+V0_MIN, V0_MAX = 359, 563       # starting speeds, 8.8 (1.4-2.2 dots a step)
+DPH_MIN, DPH_MAX = 83, 146      # phase step, 65536 = a full turn (0.008-0.014 radians)
 FRAMES = 0x2C                   # timing.s: vertical blanks counted
 
 
@@ -32,6 +34,17 @@ def speed(s, g):
 
 def phase(s, g):
     return ribbon(s, g, "pl") | ribbon(s, g, "ph") << 8
+
+
+def phase_step(s, g):
+    """Ribbon g's phase step, signed."""
+    d = ribbon(s, g, "dl") | ribbon(s, g, "dh") << 8
+    return d - 0x10000 if d & 0x8000 else d
+
+
+def set_phase(s, g, p):
+    s.poke(s.addr("str_pl") + g, p & 0xFF)
+    s.poke(s.addr("str_ph") + g, (p >> 8) & 0xFF)
 
 
 def strings(s, g):
@@ -72,6 +85,10 @@ def edge_pos(x, y):
 def separation(st):
     xa, ya, xc, yc = st
     return (edge_pos(xc, yc) - edge_pos(xa, ya)) % PERIM
+
+
+def far_end_wanted(ph):
+    return PERIM * (0.5 + SWING * math.sin(ph * 2 * math.pi / 65536))
 
 
 # ---- the line routine's dots ----
@@ -138,7 +155,7 @@ def test_longest_strings_fit(s):
     hard = fx_entry(s, FX)[3] * TICK - OVERHEAD
     worst, shape = 0, None
     for pa in range(0, PERIM, 5):
-        for d in (310, 350, 390, 430, 470, 510, 550, 590, 630):
+        for d in (188, 230, 290, 350, 410, 470, 530, 590, 650, 710, 752):
             pc = (pa + d) % PERIM
             a, c = edge_point(pa), edge_point(pc)
             cycles = draw(s, *a, *c, 1)
@@ -157,10 +174,9 @@ def test_four_diagonals_fit(s):
         s.poke(s.addr("str_sl") + g, sint & 0xFF)
         s.poke(s.addr("str_sh") + g, sint >> 8)
         s.poke(s.addr("str_sf") + g, 10)
-        s.poke(s.addr("str_vl") + g, 0xFF)
-        s.poke(s.addr("str_vh") + g, 0)
-        s.poke(s.addr("str_pl") + g, 0x100 - PH_STEP)     # phase 0 once moved: d = 470
-        s.poke(s.addr("str_ph") + g, 0xFF)
+        s.poke(s.addr("str_vl") + g, V_MIN & 0xFF)  # at the slowest, s moves on 1 dot
+        s.poke(s.addr("str_vh") + g, V_MIN >> 8)
+        set_phase(s, g, -phase_step(s, g))          # phase 0 once moved: d = 470
     cycles = s.step()
     assert strings(s, 0)[-1] == (0, 0, 279, 191)
     assert strings(s, 1)[-1] == (279, 0, 0, 191)
@@ -170,13 +186,13 @@ def test_four_diagonals_fit(s):
 
 
 def test_steps_count_every_blank(built):
-    """A step takes two or three frames; it counts every vertical blank it works through."""
+    """A step takes a few frames; it counts every vertical blank it works through."""
     s = start(FX)
     VblLatch(s)
     s.poke(ST_TIMING, 1)
     s.poke16(FRAMES, 0)
     first = s.mpu.processorCycles // TICK
-    run(s, KEEP + 30)
+    run(s, KEEP + 60)
     crossed = s.mpu.processorCycles // TICK - first
     assert crossed > 100
     assert crossed - 1 <= s.peek16(FRAMES) <= crossed
@@ -227,16 +243,21 @@ def test_rubbing_out_leaves_other_dots_alone(s):
 
 # ---- the look ----
 
-def test_ribbons_start_anywhere_at_a_gentle_speed(built):
-    for seed in (0x1111, 0x2222, 0x3333, 0x4444, 0x5555):
+def test_ribbons_start_anywhere_at_their_own_speed_and_turn(built):
+    steps = set()
+    for seed in (0x1111, 0x2222, 0x3333, 0x4444, 0x5555, 0x6666, 0x7777, 0x8888):
         s = start(FX, seed=seed)
         for g in (0, 1):
-            assert 113 <= speed(s, g) <= 224                    # 0.44-0.875 dots a step
+            assert V0_MIN <= speed(s, g) <= V0_MAX                 # 1.4-2.2 dots a step
+            assert DPH_MIN <= abs(phase_step(s, g)) <= DPH_MAX     # 0.008-0.014 radians
+            steps.add(phase_step(s, g))
             assert ribbon(s, g, "count") == 0
             assert (ribbon(s, g, "sl") | ribbon(s, g, "sh") << 8) < PERIM
+    assert min(steps) < 0 < max(steps)                 # either way round
+    assert len(steps) > 8
 
 
-def test_keeps_56_strings_per_ribbon(s):
+def test_keeps_24_strings_per_ribbon(s):
     run(s, KEEP + 20)
     for g in (0, 1):
         assert ribbon(s, g, "count") == KEEP
@@ -247,28 +268,34 @@ def test_every_string_crosses_the_screen(s):
     run(s, KEEP + 20)
     for g in (0, 1):
         for st in strings(s, g):
-            assert 0.33 * PERIM - 1 <= separation(st) <= 0.67 * PERIM + 1, st
+            assert (0.5 - SWING) * PERIM - 1 <= separation(st) <= (0.5 + SWING) * PERIM + 1, st
 
 
 def test_far_end_follows_the_phase(s):
-    for _ in range(40):
-        run(s, 7)
+    """All the way round the phase, including the far end's widest swings (282 dots
+    either way of across)."""
+    for k in range(64):
         for g in (0, 1):
-            want = PERIM * (0.5 + 0.17 * math.sin(phase(s, g) * 2 * math.pi / 65536))
-            assert abs(separation(strings(s, g)[-1]) - want) <= 1.5
+            set_phase(s, g, k * 1024 + 300 * g + 37)
+        s.step()
+        for g in (0, 1):
+            want = far_end_wanted(phase(s, g))
+            assert abs(separation(strings(s, g)[-1]) - want) <= 1.5, (k, g)
 
 
-def test_phase_drifts(s):
+def test_each_ribbon_turns_at_its_own_fixed_pace(s):
+    steps = [phase_step(s, g) for g in (0, 1)]
     before = [phase(s, g) for g in (0, 1)]
     run(s, 100)
-    assert [phase(s, g) for g in (0, 1)] == [(p + 100 * PH_STEP) & 0xFFFF for p in before]
+    assert [phase_step(s, g) for g in (0, 1)] == steps
+    assert [phase(s, g) for g in (0, 1)] == [(p + 100 * d) & 0xFFFF for p, d in zip(before, steps)]
 
 
 def test_speeds_drift_within_limits(s):
-    s.poke(s.addr("str_vl"), V_MIN)
-    s.poke(s.addr("str_vh"), 0)
-    s.poke(s.addr("str_vl") + 1, 0)
-    s.poke(s.addr("str_vh") + 1, 1)
+    s.poke(s.addr("str_vl"), V_MIN & 0xFF)
+    s.poke(s.addr("str_vh"), V_MIN >> 8)
+    s.poke(s.addr("str_vl") + 1, V_MAX & 0xFF)
+    s.poke(s.addr("str_vh") + 1, V_MAX >> 8)
     seen = [set(), set()]
     for _ in range(80):
         s.step()
@@ -276,11 +303,15 @@ def test_speeds_drift_within_limits(s):
             v = speed(s, g)
             assert V_MIN <= v <= V_MAX
             seen[g].add(v)
-    assert all(len(v) > 3 for v in seen)
+    assert all(len(v) > 10 for v in seen)
     assert V_MIN in seen[0] and V_MAX in seen[1]
+    steps = [abs(a - b) for g in (0, 1) for a, b in zip(sorted(seen[g]), sorted(seen[g])[1:])]
+    assert max(steps) <= 2 * 13                        # drifts about 0.05 a step
 
 
 def test_ribbons_move_smoothly(s):
+    """The near end moves on 1-3 dots every step, so no two strings share it; the far end
+    moves with it plus the phase's drift, up to 4 dots either way."""
     s.step()
     last = [strings(s, g)[-1] for g in (0, 1)]
     moved = [0, 0]
@@ -290,17 +321,17 @@ def test_ribbons_move_smoothly(s):
             new = strings(s, g)[-1]
             near = (edge_pos(*new[:2]) - edge_pos(*last[g][:2])) % PERIM
             far = (edge_pos(*new[2:]) - edge_pos(*last[g][2:]) + PERIM // 2) % PERIM - PERIM // 2
-            assert near in (0, 1)              # s moves 0.375-1 dots a step
-            assert -1 <= far <= 2              # plus the phase's drift, up to 0.8 either way
+            assert near in (1, 2, 3)           # s moves 1.2-2.4 dots a step
+            assert -4 <= far - near <= 4       # 282 sin ph moves up to 3.95 dots a step
             moved[g] += near
             last[g] = new
-    assert all(m >= 60 * 0.375 - 1 for m in moved)
+    assert all(m >= 60 * 1.2 - 1 for m in moved)
 
 
 def test_screen_holds_only_the_kept_strings(s):
     """The oldest string goes before the newest comes, so nothing is left behind, and the
     newest strings are drawn solid, never by flipping dots."""
-    for n in (KEEP + 10, 25):
+    for n in (KEEP + 10, 15):
         run(s, n)
         lit = s.page_pixels(PAGE1)
         assert lit <= kept_dots(s)
@@ -318,13 +349,13 @@ def kept_dots(s):
 
 def test_screen_does_not_fill_up(s):
     """Over a long run the screen only ever holds the kept strings. How many dots they light
-    depends on where the ribbons lie (strings across the screen are longer than strings down
-    it), so the count goes up and down, but never towards a full screen."""
-    for _ in range(5):
-        run(s, 100)
+    depends on where the ribbons lie (strings across the screen are longer than strings across
+    a corner), so the count goes up and down, but never towards a full screen."""
+    for _ in range(8):
+        run(s, 60)
         lit = s.page_pixels(PAGE1)
         assert lit <= kept_dots(s)
-        assert 4000 < len(lit) < 280 * 192 * 0.4
+        assert 2000 < len(lit) < 280 * 192 * 0.2
 
 
 def test_near_wrap(s):
@@ -332,8 +363,7 @@ def test_near_wrap(s):
         s.poke(s.addr("str_head") + g, RING - 3)
         s.poke(s.addr("str_sl") + g, (PERIM - 2) & 0xFF)
         s.poke(s.addr("str_sh") + g, (PERIM - 2) >> 8)
-        s.poke(s.addr("str_pl") + g, 0xF0)
-        s.poke(s.addr("str_ph") + g, 0xFF)
+        set_phase(s, g, 0xFFF0)
     s.start_tracking()
     run(s, KEEP + 10)
     assert s.writes_outside(*ALLOWED) == []

@@ -1,50 +1,62 @@
 ; Effect 7: String Theory, after the original. Two ribbons of straight
 ; strings, each string joining two points on the screen's edge roughly across
 ; the screen from each other. A ribbon has a position s on the edge (940 dots
-; round, clockwise from the top-left corner), a speed v (0.375-1 dots a step,
-; drifting) and a phase ph: its newest string runs from s to s + 940 (0.5 +
-; 0.17 sin ph). Each ribbon keeps its last 56 strings. Every step first rubs
-; out each ribbon's oldest string, then draws each ribbon's newest, solid
-; (dots are set or cleared, never flipped), so a ribbon stays still where it
-; isn't moving; only where strings cross do a few dots go missing.
+; round, clockwise from the top-left corner), a speed v (1.2-2.4 dots a step,
+; drifting) and a phase ph that turns 0.008-0.014 radians a step, a pace and
+; a way round of the ribbon's own: its newest string runs from s to
+; s + 940 (0.5 + 0.3 sin ph). With s moving on more than a dot a step, strings
+; lie far enough apart to show one by one where a ribbon is wide; they bunch
+; only where it twists. Each ribbon keeps its last 24 strings. Every step
+; first rubs out each ribbon's oldest string, then draws each ribbon's newest,
+; solid (dots are set or cleared, never flipped), so a ribbon stays still
+; where it isn't moving; only where strings cross do a few dots go missing.
 ;
 ; Strings are drawn by a line routine of its own, unrolled for each dot
-; position in a byte: four strings up to a screen wide or tall a step must fit
-; 5 ticks. Drawn straight onto page 1.
+; position in a byte: four strings up to a screen wide or tall a step, 10
+; steps a second (6 ticks). Drawn straight onto page 1.
 
 .include "config.inc"
 
 .export fx_strings_init, fx_strings_step, str_line
 .export str_xal, str_xah, str_ya, str_xcl, str_xch, str_yc
-.export str_sf, str_sl, str_sh, str_vl, str_vh, str_pl, str_ph, str_head, str_count
+.export str_sf, str_sl, str_sh, str_vl, str_vh, str_pl, str_ph, str_dl, str_dh
+.export str_head, str_count
 .export str_lx0, str_ly0, str_lx1, str_ly1, str_mode
 
 .import rng_next, rng_below, show_page1, vbl_poll
 .import row_lo, row_hi, xbyte_lo, xbit_lo, xmod_lo, xbyte_hi, xmod_hi
 
 NRIB    = 2                     ; ribbons
-KEEP    = 56                    ; strings kept per ribbon
-RING    = 64                    ; ring slots per ribbon
+KEEP    = 24                    ; strings kept per ribbon
+RING    = 32                    ; ring slots per ribbon
+NSLOT   = NRIB * RING
 PERIM   = 2 * (279 + 191)       ; the screen's edge: 940 dots round
 HALF    = PERIM / 2
-V_MIN   = 96                    ; slowest, 8.8: 0.375 dots a step (fastest 1.0, $0100)
-PH_STEP = 52                    ; phase a step, 65536 = a full turn (0.005 radians)
+V_MIN   = 307                   ; speed, 8.8: slowest 1.2 dots a step,
+V_MAX   = 614                   ;   fastest 2.4,
+V_START = 359                   ;   starting 1.4-2.2 (359 + 0..204),
+V_SPAN  = 205
+V_DRIFT = 13                    ;   drifting up to 13 (of 256) a step: 0.05
+DPH_MIN = 83                    ; phase step, 65536 = a full turn: 0.008-0.014
+DPH_SPAN = 64                   ;   radians (83 + 0..63), either way round
 
 ; ---- state in FXRAM ----
-str_xal   = FXRAM               ; strings, slot = ribbon * 64 + ring index:
-str_xah   = str_xal + 128       ;   near end x (lo, hi), y
-str_ya    = str_xah + 128
-str_xcl   = str_ya + 128        ;   far end x (lo, hi), y
-str_xch   = str_xcl + 128
-str_yc    = str_xch + 128
-str_sf    = str_yc + 128        ; per ribbon: s, fraction
+str_xal   = FXRAM               ; strings, slot = ribbon * 32 + ring index:
+str_xah   = str_xal + NSLOT     ;   near end x (lo, hi), y
+str_ya    = str_xah + NSLOT
+str_xcl   = str_ya + NSLOT      ;   far end x (lo, hi), y
+str_xch   = str_xcl + NSLOT
+str_yc    = str_xch + NSLOT
+str_sf    = str_yc + NSLOT      ; per ribbon: s, fraction
 str_sl    = str_sf + NRIB       ;   s, whole dots (0-939)
 str_sh    = str_sl + NRIB
 str_vl    = str_sh + NRIB       ;   v, 8.8
 str_vh    = str_vl + NRIB
 str_pl    = str_vh + NRIB       ;   phase, 65536 = a full turn
 str_ph    = str_pl + NRIB
-str_head  = str_ph + NRIB       ;   ring slot the next string goes in
+str_dl    = str_ph + NRIB       ;   phase step, signed
+str_dh    = str_dl + NRIB
+str_head  = str_dh + NRIB       ;   ring slot the next string goes in
 str_count = str_head + NRIB     ;   strings kept
 
 ; ---- zero page ----
@@ -108,13 +120,32 @@ fx_strings_init:
         sta str_sh,x
         jsr rng_next
         sta str_sf,x
-        lda #112                ; v: 0.44-0.875 dots a step
+        lda #V_SPAN             ; v: 1.4-2.2 dots a step
+        jsr rng_below
+        ldx G
+        clc
+        adc #<V_START
+        sta str_vl,x
+        lda #>V_START
+        adc #0
+        sta str_vh,x
+        lda #DPH_SPAN           ; phase step: 0.008-0.014 radians...
         jsr rng_below
         clc
-        adc #113
+        adc #DPH_MIN
+        sta T0
         ldx G
-        sta str_vl,x
-        stz str_vh,x
+        stz str_dh,x
+        jsr rng_next            ; ... either way round
+        and #$80
+        beq :+
+        lda #0
+        sec
+        sbc T0
+        sta T0
+        dec str_dh,x
+:       lda T0
+        sta str_dl,x
         jsr rng_next            ; phase: anywhere
         sta str_pl,x
         jsr rng_next
@@ -179,12 +210,12 @@ slot:   and #RING - 1
 
 ; move: ribbon X's speed drifts, it moves on, its phase turns.
 move:
-        lda #7                  ; v += -3..3 (of 256): about +/-0.0125
+        lda #2 * V_DRIFT + 1    ; v += -13..13 (of 256)
         jsr rng_below
         ldx G
         ldy #0
         sec
-        sbc #3
+        sbc #V_DRIFT
         bcs :+
         dey
 :       clc
@@ -193,14 +224,25 @@ move:
         tya
         adc str_vh,x
         sta str_vh,x
-        beq @slow               ; within 0.375-1.0
-        stz str_vl,x            ; 1.0 or more: 1.0
-        bra @go
-@slow:  lda str_vl,x
-        cmp #V_MIN
-        bcs @go
-        lda #V_MIN
+        lda str_vl,x            ; v below 1.2: 1.2
+        cmp #<V_MIN
+        lda str_vh,x
+        sbc #>V_MIN
+        bcs @fast
+        lda #<V_MIN
         sta str_vl,x
+        lda #>V_MIN
+        sta str_vh,x
+        bra @go
+@fast:  lda #<V_MAX             ; above 2.4: 2.4
+        cmp str_vl,x
+        lda #>V_MAX
+        sbc str_vh,x
+        bcs @go
+        lda #<V_MAX
+        sta str_vl,x
+        lda #>V_MAX
+        sta str_vh,x
 @go:    clc                     ; s += v
         lda str_sf,x
         adc str_vl,x
@@ -210,7 +252,7 @@ move:
         sta str_sl,x
         bcc :+
         inc str_sh,x
-:       sec                     ; past the last position: round again
+:       sec                     ; past the last position (by under 3): round again
         lda str_sl,x
         sbc #<PERIM
         tay
@@ -222,21 +264,25 @@ move:
         sta str_sl,x
 :       clc                     ; the phase turns
         lda str_pl,x
-        adc #PH_STEP
+        adc str_dl,x
         sta str_pl,x
-        bcc :+
-        inc str_ph,x
-:       rts
+        lda str_ph,x
+        adc str_dh,x
+        sta str_ph,x
+        rts
 
 ; add_string: ribbon X's newest string, from s to s + d, kept and drawn.
 add_string:
-        lda str_pl,x            ; d = 470 +/- 159.8 sin ph: the table's entry for
-        sta T0                  ; the phase's high byte, plus the way to the next
-        ldy str_ph,x            ; entry times the low byte (rounded)
+        lda str_pl,x            ; d = 470 +/- 282 sin ph. The swing is the
+        sta T0                  ; table's entry for the phase's high byte (its
+        lda str_ph,x            ; low 7 bits: |sin| repeats every half turn),
+        sta T1                  ; plus the way to the next entry times the low
+        and #$7F                ; byte (rounded)
+        tay
         stz T2
-        lda str_amp+1,y
-        sec
-        sbc str_amp,y           ; -4..4
+        lda str_amp_lo+1,y      ; -7..7 (the low bytes' difference is the
+        sec                     ; whole difference)
+        sbc str_amp_lo,y
         beq @plus
         sta T3
         bpl :+
@@ -252,30 +298,37 @@ add_string:
         bne @mul
         lda T3
         bpl @plus
-        lda str_amp,y
-        sec
+        sec                     ; the swing, 0-282
+        lda str_amp_lo,y
         sbc T2
-        bra @swing
-@plus:  lda str_amp,y
-        clc
-        adc T2
-@swing: sta T1                  ; 0-160
-        cpy #128                ; the first half turn adds, the second takes away
-        bcs @minus
-        clc
-        lda #<HALF
-        adc T1
         sta DL
-        lda #>HALF
+        lda str_amp_hi,y
+        sbc #0
+        sta DL+1
+        bra @swing
+@plus:  clc
+        lda str_amp_lo,y
+        adc T2
+        sta DL
+        lda str_amp_hi,y
         adc #0
+        sta DL+1
+@swing: bit T1                  ; the first half turn adds, the second takes away
+        bmi @minus
+        clc
+        lda DL
+        adc #<HALF
+        sta DL
+        lda DL+1
+        adc #>HALF
         sta DL+1
         bra @ends
 @minus: sec
         lda #<HALF
-        sbc T1
+        sbc DL
         sta DL
         lda #>HALF
-        sbc #0
+        sbc DL+1
         sta DL+1
 @ends:  ldx G                   ; near end at s
         lda str_sl,x

@@ -85,7 +85,7 @@ frames to a deadline. `tests/mame/pacing.lua` checks every effect's real rate. F
 - Warp: 64 stars (70 were planned).
 - Starry Night: up to 85 stars (about 90 were planned; star records must fit one 8-bit index).
 - Nightlines: ends kept in the top-left quarter, so 8 lines a step fit 5 ticks.
-- String Theory: 2 ribbons of 56 strings at 5 ticks; its own unrolled line routine (`str_line`),
+- String Theory: 2 ribbons of 24 strings at 6 ticks; its own unrolled line routine (`str_line`),
   about twice as fast as `fline` on long lines.
 
 ## Never
