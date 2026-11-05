@@ -174,7 +174,7 @@ normalize_display:
 ; toasters 2.7 ticks, Warp 1.6, Starry Night 0.1, Zot! idle, worms 2.1,
 ; Lissajous 1.0, Nightlines 1.6, String Theory 2.2, Rose 1.4, Doodles 0.25).
 fx_slow:
-        .byte 1, 0, 4, 3, 1, 2, 3, 4, 1, 2, 30, 8, 2, 3      ; 10-13: empty for now; set once measured
+        .byte 1, 0, 4, 3, 1, 2, 3, 4, 1, 2, 30, 8, 2, 1      ; 10-13: empty for now; set once measured
 
 ; Per effect: where it is in aux memory and its size, wipe first (1/0),
 ; ticks per step. The FX file is effects 0, 1, 2... one after another.
