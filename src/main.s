@@ -186,7 +186,7 @@ fx_table:
         .word __FX2_LOAD__, __FX2_SIZE__
         .byte 1, 4              ; 2 Starry Night
         .word __FX3_LOAD__, __FX3_SIZE__
-        .byte 0, 3              ; 3 Zot!
+        .byte 1, 3              ; 3 Zot! (on a cleared screen, Wells 2026-11-05)
         .word __FX4_LOAD__, __FX4_SIZE__
         .byte 0, 3              ; 4 Can of Worms
         .word __FX5_LOAD__, __FX5_SIZE__

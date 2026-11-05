@@ -1,4 +1,4 @@
-; Effect 3: Zot! Lightning strikes over whatever is on the screen.
+; Effect 3: Zot! Lightning strikes on a cleared screen (the randomizer wipes first).
 ;
 ; A bolt is a jagged trunk from the top of the screen, two dots wide, with
 ; branches up to two levels deep. It is drawn by inverting dots, so drawing
