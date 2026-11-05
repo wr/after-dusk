@@ -37,8 +37,9 @@ Needs `ca65`/`ld65` (cc65) and `mame` on PATH. Emulator ROM images are not in th
 - `src/` 65C02 sources (ca65). `main.s` links first so `start` is at `$6000`.
   `config.inc` holds every shared address below. `after-dusk.cfg` is the linker layout.
 - `src/fx_*.s` one effect each, in its own segment `FXn` (n = its id), starting with
-  `jmp init` and `jmp step`. To add one: a segment and an `OVLn` area in `after-dusk.cfg`, an
-  entry in `fx_table` and `fx_slow` (`main.s`), `NFX` in `config.inc` and `tests/fxcommon.py`.
+  `jmp init` and `jmp step`. To add one: a segment and an `OVLn` area in `after-dusk.cfg`; in
+  `main.s` the `.import __FXn_LOAD__, __FXn_SIZE__` line and entries in `fx_table` and `fx_slow`;
+  `NFX` in `config.inc` and `tests/fxcommon.py`.
 - `basic/hello.bas` the HELLO program: bumps a seed in the text file `SEED`, POKEs it to `$0300`,
   then `BLOAD FX` and `BRUN AFTERDUSK`.
 - `tools/` generators (`gen_tables.py`, `gen_art.py`), `bootstrap.sh`, FloppyEmu tools.
@@ -55,10 +56,10 @@ Memory:
 | `$20`–`$2F` | core state: `RNG` `$20`, `TICKS` `$22`, `DISP` `$24` |
 | `$30`–`$3F` | sprite engine |
 | `$40`–`$7F` | private to the running effect |
-| `$0300`–`$0301` | seed from HELLO |
-| `$0310`–`$031F` | status block for tests |
 | `$80`–`$8F` | drawing scratch (`hires.s`); the loader's pointers between effects |
 | `$90`–`$9F` | sprite-engine scratch |
+| `$0300`–`$0301` | seed from HELLO |
+| `$0310`–`$031F` | status block for tests |
 | `$0800`–`$1FFF` | `FXRAM`, private to the running effect |
 | `$2000` / `$4000` | hi-res page 1 / page 2 (the FX file sits here until start-up copies it) |
 | `$6000`–`$87FF` | the resident program (10,240 bytes max) |

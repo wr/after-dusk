@@ -250,8 +250,8 @@ load_fx:
         cmp #1                  ; low byte isn't 0
         lda fx_table+3,x
         adc #0
-        tax
-        jmp aux_fetch
+        tax                     ; never 0: every overlay starts with two jmps
+        jmp aux_fetch           ; (0 would copy 256 pages over everything)
 
 .segment "LCCODE"
 ; aux_fetch: copy X pages from aux memory at LSRC to main memory at LDST.

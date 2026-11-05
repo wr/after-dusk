@@ -42,7 +42,7 @@ SEED_LO = $0300
 SEED_HI = $0301
 
 ; ---- status block, read by the emulator tests ----
-ST_FX     = $0310             ; current effect 0-5, $FF before the first
+ST_FX     = $0310             ; current effect 0 to NFX-1, $FF before the first
 ST_STARTS = $0311             ; effects started, wraps
 ST_BEAT   = $0312             ; 16-bit steps since boot, wraps
 ST_TIMING = $0314             ; 1 = vertical-blank pacing, 0 = cycle-counted

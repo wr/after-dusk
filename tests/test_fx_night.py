@@ -1,6 +1,9 @@
 import pytest
 
-from fxcommon import check_bit7, check_budget, check_in_bounds, run, start
+from fxcommon import TICK, check_bit7, check_budget, check_in_bounds, run, start
+from sim import ST_TIMING, VblLatch
+
+FRAMES = 0x2C                   # timing.s: vertical blanks counted
 
 FX = 6
 KEEP = 20                       # generations kept, 4 lines each
@@ -228,3 +231,16 @@ def test_ends_bounce_off_the_edges(s):
         assert s.peek16(a + off) == want, (off, pos)
         v1 = signed(s.peek16(a + 4 + off))
         assert (v1 < 0) == (v > 0) and v1 != 0, (off, pos, v1)   # turned back
+
+
+def test_steps_count_every_blank(built):
+    """Steps can take two frames; every vertical blank they work through is counted."""
+    s = start(FX)
+    VblLatch(s)
+    s.poke(ST_TIMING, 1)
+    s.poke16(FRAMES, 0)
+    first = s.mpu.processorCycles // TICK
+    run(s, 200)
+    crossed = s.mpu.processorCycles // TICK - first
+    assert crossed > 100
+    assert crossed - 1 <= s.peek16(FRAMES) <= crossed
