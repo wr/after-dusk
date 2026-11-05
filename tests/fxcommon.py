@@ -1,7 +1,7 @@
 """Shared checks for the effects."""
 from sim import PAGE1, PAGE2, ST_FX, ST_TIMING, Sim
 
-NFX = 10                        # effects (fx_count)
+NFX = 14                        # effects (fx_count)
 OVL = 0x8800                    # the overlay slot: jmp init, jmp step
 
 # Writes an effect may make: drawing scratch, RNG and core scratch, DISP,
