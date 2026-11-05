@@ -8,7 +8,7 @@ from sim import PAGE1, row_base
 FX = 9
 W, H = 280, 192
 PTS = 41                        # points in a doodle, joined by 40 segments
-PER = 20                        # steps a doodle takes: 2 segments a step
+PER = 10                        # steps a doodle takes: 4 segments a step
 HOLD = 75                       # steps a full grid stays up
 DRAW, HOLDING, CLEARING = 0, 1, 2
 TICKS = 2

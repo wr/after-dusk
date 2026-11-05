@@ -1,8 +1,8 @@
 ; Effect 9: Doodles. The screen is split into a grid of cells, 4-8 across and
 ; 3-6 down (picked afresh for each grid), and a pen fills them one at a time,
 ; left to right, top to bottom. Each doodle is one smooth looping stroke: 41
-; points joined by 40 straight lines, two lines a step, so a doodle takes 20
-; steps. Point i is at t = end * i / 40, end 0.75-1 of a turn:
+; points joined by 40 straight lines, four lines a step, so a doodle takes 10
+; steps (a third of a second). Point i is at t = end * i / 40, end 0.75-1 of a turn:
 ;   x = cx + ax (0.63 sin(f0 t + q0) + 0.37 sin(f1 t + q1))
 ;   y = cy + ay (0.63 sin(f2 t + q2) + 0.37 sin(f3 t + q3))
 ; f0, f2 1-3, f1, f3 2-5, q random, (cx, cy) the cell's centre, ax 0.34 of the
@@ -90,7 +90,9 @@ fx_doodles_step:
         sta dd_mode
         stz dd_crow
         jmp clear_band
-@draw:  jsr segment
+@draw:  jsr segment             ; four lines a step: a doodle in 10 steps
+        jsr segment
+        jsr segment
         jsr segment
         lda dd_k
         cmp #PTS
