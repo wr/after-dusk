@@ -89,5 +89,7 @@ def test_load_is_quick(s):
     biggest = max(range(len(entries(s))), key=lambda i: entries(s)[i][1])
     pages = (entries(s)[biggest][1] + 255) // 256
     cycles = s.call("load_fx", a=biggest)
-    assert cycles < 4_200 * pages + 300
-    assert 4_200 * 14 < 6 * 17_030          # a full slot: under 6 frames, 0.1 s
+    # 16-17 cycles a byte: one more whenever the source crosses a page, which
+    # it does on every page unless the effect starts on a page boundary
+    assert cycles < 4_400 * pages + 300
+    assert 4_400 * 14 < 6 * 17_030          # a full slot: under 6 frames, 0.1 s
