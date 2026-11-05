@@ -170,7 +170,7 @@ normalize_display:
 ; Without vertical blank (the cycle-counted fallback), ticks to wait after
 ; each effect's step: its ticks minus its typical work (measured medians:
 ; toasters 2.7 ticks, Warp 1.6, Starry Night 0.1, Zot! idle, worms 2.1,
-; Lissajous 1.0, Nightlines 1.8, String Theory 2.2, Rose 1.3, Doodles 0.25).
+; Lissajous 1.0, Nightlines 1.8, String Theory 2.2, Rose 1.4, Doodles 0.25).
 fx_slow:
         .byte 1, 0, 4, 3, 1, 2, 3, 4, 1, 2
 

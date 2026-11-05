@@ -7,7 +7,8 @@ rose_s240  |sin| of 240 steps to a turn (1.5 degrees), for sin(t + u) and cos(t 
 The values A, B and C glide between:
 rose_a8    8 A for A = 0, 1, 4, 9, 16 (8 A is what the dot's angle index steps by)
 rose_bl/h  B, signed, 8192 = 1: -1.28 + 0.16 (i >> 1) + 0.04 (i & 1) for i < 32, then -1.20 + ...
-rose_cl/h  C = 42 sqrt(i) 10/57 dots for i = 0-31 (42 = 4/9 of the half-height), 8.8
+rose_cl/h  C = 54 sqrt(i) 10/57 dots for i = 0-31 (up to 52.7: the biggest figures reach past the
+           top and bottom of the screen, and the program skips those dots), 8.8
 rose_cxl/h 1.1 C, 8.8 (x is stretched 1.1: IIc dots are wider than tall)
 C and 1.1 C carry 256/255 too, so that C x sin magnitude / 256 is C sin.
 """
@@ -19,7 +20,7 @@ XA = 1.1
 A_TAB = (0, 1, 4, 9, 16)
 B_TAB = ([(-128 + 16 * (i >> 1) + 4 * (i & 1)) / 100 for i in range(32)]
          + [(-120 + 16 * (i >> 1) + 4 * (i & 1)) / 100 for i in range(32)])
-C_TAB = [42 * math.sqrt(i) * 10 / 57 for i in range(32)]
+C_TAB = [54 * math.sqrt(i) * 10 / 57 for i in range(32)]
 B_ONE = 8192
 SINE = 255
 

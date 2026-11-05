@@ -1,29 +1,43 @@
-; Effect 8: Rose, by the original After Dark Rose's method. Each step draws
-; 16 big 2 x 2 dots, k = 1..16, u = 22.5k degrees:
+; Effect 8: Rose, by the original After Dark Rose's method. Each of its
+; frames has 16 big 2 x 2 dots, k = 1..16, u = 22.5k degrees:
 ;   x = 140 + floor(1.1 C (B sin(A u) + sin(t + u)))
 ;   y =  96 + floor(    C (B cos(A u) + cos(t + u)))
 ; so each dot circles (radius C) round its own centre, and t turns 1.5
-; degrees a step (240 to a turn). sin(A u) comes from a 128-step table: u is
+; degrees a frame (240 to a turn). sin(A u) comes from a 128-step table: u is
 ; 8k 128ths of a turn, so its index is floor(8 k A) & 127.
 ; A is 0, 1, 4, 9 or 16, B one of 64 values from -1.28 to 1.24, C one of 32
-; sizes up to 4/9 of the half-height; all three glide in a straight line to
-; new random values over 250 steps, then pick again. C starts at 0. The last
-; 720 dots stay (45 steps): before each new dot is drawn, the one it
-; replaces is rubbed out. Drawn straight onto page 1.
+; sizes up to 54 dots; all three glide in a straight line to new random
+; values over 250 frames, then pick again. C starts at 0.
+; The original runs at 60 frames a second; a step here (30 a second) is two
+; of its frames: t and the glide go on a frame, the 16 dots are drawn, and
+; they go on another frame. So the dots along each line are 3 degrees apart
+; (dotted when C is big, solid when small) and a glide takes 125 steps.
+; The last 368 dots stay (23 steps, about the original's 69 degrees of each
+; line): before each new dot is drawn, the one it replaces is rubbed out.
+; The biggest figures reach past the top and bottom: a dot whose block would
+; leave rows 0-191 is skipped, neither drawn nor rubbed out. x stays on the
+; screen (140 +- 1.1 x 52.8 x 2.28 is 7-272) but needs 9 bits. Drawn straight
+; onto page 1.
 
 .include "config.inc"
 
 .export fx_rose_init, fx_rose_step
 .export rose_ring, rose_slot, rose_full, rose_n, rose_t, rose_from, rose_to
-.export rose_curl, rose_curh, rose_rem
+.export rose_curl, rose_curh, rose_rem, rose_dwl, rose_dwh, rose_dr
 
 .import rng_below, show_page1, vbl_poll
-.import row_lo, row_hi, xbyte_lo, xbit_lo
+.import row_lo, row_hi, xbyte_lo, xbit_lo, xbyte_hi, xbit_hi
 
 DOTS    = 16                    ; dots a step
-SLOTS   = 45                    ; steps kept: 720 dots
-GLIDE   = 250                   ; steps from one value to the next
-STEPS   = 240                   ; t's steps to a turn
+SLOTS   = 23                    ; steps kept: 368 dots
+SLOTB   = 64                    ; a step's dots in the ring: 16 x 3 bytes, padded
+GLIDE   = 250                   ; frames from one value to the next
+STEPS   = 240                   ; t's frames to a turn
+SKIP    = $80                   ; a ring dot's x high byte when it was off the screen
+XB      = 75                    ; x = 140 + floor(1.1 C B sin(A u) + 1.1 C sin(t + u))
+XT      = 65                    ; is summed as (XB + the first) + (XT + the second),
+                                ; both never negative (-75..74 and -59..58), so the
+                                ; carry is x's ninth bit
 
 ; The gliding values, each a whole number plus 250ths so the glide is exact:
 GA = 0                          ; 8 A (the angle index's step from dot to dot)
@@ -32,8 +46,9 @@ GC = 2                          ; C, 8.8 dots (x 256/255, see gen_rose.py)
 GX = 3                          ; 1.1 C, likewise
 
 ; ---- state in FXRAM ----
-rose_ring  = FXRAM              ; 45 x 32: the kept dots, a step's 16 (x, y)
-rose_txl   = FXRAM + SLOTS * DOTS * 2   ; 16: 1.1 C sin(t + 22.5 j), 8.8
+rose_ring  = FXRAM              ; 23 x 64: the kept dots, a step's 16 (x low,
+                                ; x high or SKIP, y)
+rose_txl   = FXRAM + SLOTS * SLOTB      ; 16: XT + 1.1 C sin(t + 22.5 j), 8.8
 rose_txh   = rose_txl + 16
 rose_tyl   = rose_txh + 16      ; 16: C sin(t + 22.5 j), 8.8
 rose_tyh   = rose_tyl + 16
@@ -47,10 +62,10 @@ rose_tvl   = rose_dr + 4        ; 4: its target
 rose_tvh   = rose_tvl + 4
 rose_from  = rose_tvh + 4       ; 3: table indices of A, B, C at the glide's start
 rose_to    = rose_from + 3      ; 3: ... and at its end
-rose_n     = rose_to + 3        ; steps into the glide, 0-249
-rose_t     = rose_n + 1         ; t, 0-239
-rose_slot  = rose_t + 1         ; the ring's next step slot, 0-44
-rose_full  = rose_slot + 1      ; step slots filled, 0-45
+rose_n     = rose_to + 3        ; frames into the glide, 0-249 (even between steps)
+rose_t     = rose_n + 1         ; t, 0-239 (likewise)
+rose_slot  = rose_t + 1         ; the ring's next step slot, 0-22
+rose_full  = rose_slot + 1      ; step slots filled, 0-23
 
 ; ---- zero page ----
 ML   = FXZ                      ; mul: the 16-bit multiplicand
@@ -67,7 +82,7 @@ SGNB = FXZ+10                   ; $80 when B < 0
 ACCW = FXZ+11                   ; k x 8 A: whole part (mod 256)...
 ACCR = FXZ+12                   ; ... and 250ths
 K    = FXZ+13                   ; the dot, 1-16
-RO   = FXZ+14                   ; its (x, y) in the ring slot, 0-30
+RO   = FXZ+14                   ; its place in the ring slot, 0-45
 RP   = FXZ+15                   ; 2: the ring slot
 NX   = FXZ+17                   ; the new dot
 NY   = FXZ+18
@@ -82,6 +97,8 @@ J    = FXZ+26
 ROW0 = FXZ+27                   ; 2: the dot's top row
 ROW1 = FXZ+29                   ; 2: its bottom row
 MASK = FXZ+31
+NXH  = FXZ+32                   ; the new dot's x high byte, or SKIP
+XH   = FXZ+33                   ; dot_set / dot_clear: x's high byte
 
 .segment "FX8"
         jmp fx_rose_init        ; the overlay's entry points
@@ -101,7 +118,7 @@ fx_rose_init:
         jsr rng_below
         sta rose_to+1
         stz rose_to+2
-        jsr targets
+        jsr rose_targets
         ; fall through: start the first glide from there
 
 ; glide: the targets are reached; they become the start, and new ones are
@@ -129,7 +146,7 @@ glide:  stz rose_n
         lda #32
         jsr rng_below
         sta rose_to+2
-        jsr targets
+        jsr rose_targets
         ldx #3                  ; each value's step: (target - now) / 250,
 @each:  sec                     ; floored, and the 250ths left over
         lda rose_tvl,x
@@ -170,8 +187,8 @@ glide:  stz rose_n
         bpl @each
         rts
 
-; targets: each value's target, from the tables.
-targets:
+; rose_targets: each value's target, from the tables (rose_to).
+rose_targets:
         ldx rose_to
         lda rose_a8,x
         sta rose_tvl+GA
@@ -267,8 +284,9 @@ mulb:   lda ABL
 
 ; ================================================================ step
 fx_rose_step:
+        jsr advance             ; the step's first frame, not drawn
         jsr vbl_poll
-        ; B's sign and size, and C |B|, 1.1 C |B|
+        ; the second frame's dots. B's sign and size, and C |B|, 1.1 C |B|
         lda rose_curl+GB
         sta ABL
         lda rose_curh+GB
@@ -334,14 +352,18 @@ fx_rose_step:
         lda TM
         jsr mul
         jsr signed
-        lda TL
+        lda TL                  ; (x's, with XT added)
         sta rose_txl,x
         lda TH
+        clc
+        adc #XT
         sta rose_txh,x
         jsr neg_t
         lda TL
         sta rose_txl+8,x
         lda TH
+        clc
+        adc #XT
         sta rose_txh+8,x
         lda TA                  ; 22.5 degrees on
         clc
@@ -354,20 +376,17 @@ fx_rose_step:
         cpx #8
         bne @tj
 
-        ; the ring slot this step fills: slot x 32
+        ; the ring slot this step fills: slot x 64
         lda rose_slot
-        lsr a
         lsr a
         lsr a
         clc
         adc #>rose_ring
         sta RP+1
         lda rose_slot
+        .repeat 6
         asl a
-        asl a
-        asl a
-        asl a
-        asl a
+        .endrepeat
         sta RP                  ; (rose_ring is page-aligned)
         stz RO
         stz ACCW
@@ -390,7 +409,7 @@ fx_rose_step:
         sta ACCW
         and #127
         sta IDX
-        ; x = 140 + 1.1 C B sin(A u) + 1.1 C sin(t + u)
+        ; x = 140 + 1.1 C B sin(A u) + 1.1 C sin(t + u), 9 bits
         tay
         lda CBXL
         sta ML
@@ -406,17 +425,22 @@ fx_rose_step:
         eor SGNB
         bpl :+
         jsr neg_t
-:       lda K
+:       lda TH
+        clc
+        adc #XB                 ; the first term + XB, 0-149
+        sta TH
+        lda K
         and #15
         tax
         clc
         lda TL
         adc rose_txl,x
         lda TH
-        adc rose_txh,x
-        clc
-        adc #140
+        adc rose_txh,x          ; + XT + the second
         sta NX
+        lda #0
+        rol a                   ; the carry is x's ninth bit
+        sta NXH
         ; y = 96 + C B cos(A u) + C cos(t + u), the cosines a quarter turn on
         lda IDX
         clc
@@ -447,17 +471,28 @@ fx_rose_step:
         lda TL
         adc rose_tyl,x
         lda TH
-        adc rose_tyh,x
-        clc
-        adc #96
+        adc rose_tyh,x          ; the two terms: -121..120, no overflow
+        eor #$80                ; + 128: 7-248
+        sec
+        sbc #128 - 96           ; y, with carry clear when it is below 0
+        bcc @off
+        cmp #191                ; the block's rows, y and y + 1, must be 0-191
+        bcs @off
         sta NY
+        bra @old
+@off:   lda #SKIP               ; off the top or bottom: skip it
+        sta NXH
 
-        lda rose_full           ; rub out the dot this one replaces
+@old:   lda rose_full           ; rub out the dot this one replaces, if drawn
         cmp #SLOTS
         bne @keep
         ldy RO
         lda (RP),y
         tax
+        iny
+        lda (RP),y
+        bmi @keep               ; it was skipped
+        sta XH
         iny
         lda (RP),y
         tay
@@ -466,14 +501,20 @@ fx_rose_step:
         lda NX
         sta (RP),y
         iny
+        lda NXH
+        sta (RP),y
+        iny
         lda NY
         sta (RP),y
         iny
         sty RO
+        lda NXH
+        bmi @next
+        sta XH
         ldx NX
         ldy NY
         jsr dot_set
-        inc K
+@next:  inc K
         lda K
         cmp #DOTS + 1
         beq :+
@@ -489,6 +530,11 @@ fx_rose_step:
         bne :+
         ldx #0
 :       stx rose_slot
+        ; fall through: the step's second frame is done
+
+; advance: one frame on. t turns 1.5 degrees, the values glide a 250th of the
+; way, and at the end of the glide new targets are picked.
+advance:
         ldx rose_t              ; t turns on
         inx
         cpx #STEPS
@@ -533,10 +579,10 @@ signed: sta TH
 :       rts
 
 ; ================================================================ dots
-; dot_set / dot_clear: the 2 x 2 dot with its top-left at x = X (0-254),
+; dot_set / dot_clear: the 2 x 2 dot with its top-left at x = XH:X (0-278),
 ; y = Y (0-190), on page 1.
 .macro DOT apply
-        .local split
+        .local split, high, go
         lda row_lo,y
         sta ROW0
         lda row_hi,y
@@ -545,9 +591,14 @@ signed: sta TH
         sta ROW1
         lda row_hi+1,y
         sta ROW1+1
+        lda XH
+        bne high
         ldy xbyte_lo,x
         lda xbit_lo,x
-        cmp #$40
+        bra go
+high:   ldy xbyte_hi,x          ; x 256 and on
+        lda xbit_hi,x
+go:     cmp #$40
         beq split
         sta MASK                ; x and x + 1 in the same byte
         asl a
