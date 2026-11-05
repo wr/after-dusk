@@ -3,5 +3,6 @@ build/
 .superpowers/
 src/tables.inc
 src/art.inc
+src/*_tables.inc
 __pycache__/
 .pytest_cache/

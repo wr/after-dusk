@@ -23,6 +23,8 @@
 .import __FX0_LOAD__, __FX0_SIZE__, __FX1_LOAD__, __FX1_SIZE__
 .import __FX2_LOAD__, __FX2_SIZE__, __FX3_LOAD__, __FX3_SIZE__
 .import __FX4_LOAD__, __FX4_SIZE__, __FX5_LOAD__, __FX5_SIZE__
+.import __FX6_LOAD__, __FX6_SIZE__, __FX7_LOAD__, __FX7_SIZE__
+.import __FX8_LOAD__, __FX8_SIZE__, __FX9_LOAD__, __FX9_SIZE__
 
 FXOFF   = CORE+6        ; current effect's offset into fx_table (id * 6)
 LSRC    = DSX+12        ; 2: copy source (drawing scratch, free between effects)
@@ -170,7 +172,7 @@ normalize_display:
 ; toasters 2.7 ticks, Warp 1.6, Starry Night 0.1, Zot! idle, worms 2.1,
 ; Lissajous 1.0).
 fx_slow:
-        .byte 1, 0, 4, 3, 1, 2
+        .byte 1, 0, 4, 3, 1, 2, 1, 1, 1, 1      ; 6-9: set once measured
 
 ; Per effect: where it is in aux memory and its size, wipe first (1/0),
 ; ticks per step. The FX file is effects 0, 1, 2... one after another.
@@ -189,6 +191,14 @@ fx_table:
         .byte 0, 3              ; 4 Can of Worms
         .word __FX5_LOAD__, __FX5_SIZE__
         .byte 1, 3              ; 5 Lissajous
+        .word __FX6_LOAD__, __FX6_SIZE__
+        .byte 1, 5              ; 6 Nightlines
+        .word __FX7_LOAD__, __FX7_SIZE__
+        .byte 1, 5              ; 7 String Theory
+        .word __FX8_LOAD__, __FX8_SIZE__
+        .byte 1, 2              ; 8 Rose
+        .word __FX9_LOAD__, __FX9_SIZE__
+        .byte 1, 2              ; 9 Doodles
 
 ; ---------------------------------------------------------------- loader
 ; fx_stash: copy main $2000-$5FFF, where HELLO loaded the FX file, to the

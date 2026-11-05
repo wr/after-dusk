@@ -50,7 +50,7 @@ ST_FAST   = $0315             ; 1 = IIc Plus (4 MHz) detected
 KEYHELD   = $0316             ; 1 while the key that last skipped is still down
 
 ; ---- effects: kept in aux memory, run one at a time in the overlay slot ----
-NFX       = 6                 ; effects
+NFX       = 10                ; effects
 OVL       = $8800             ; overlay slot, $8800-$95FF: jmp init at OVL,
 OVL_STEP  = OVL+3             ; jmp step at OVL+3
 FXSTORE   = $2000             ; the FX file: main $2000-$5FFF at boot, then aux

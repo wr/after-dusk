@@ -1,7 +1,7 @@
 """Shared checks for the effects."""
 from sim import PAGE1, PAGE2, ST_FX, ST_TIMING, Sim
 
-NFX = 6                         # effects (fx_count)
+NFX = 10                        # effects (fx_count)
 OVL = 0x8800                    # the overlay slot: jmp init, jmp step
 
 # Writes an effect may make: drawing scratch, RNG and core scratch, DISP,
@@ -13,8 +13,6 @@ ALLOWED = [
     (0xC050, 0xC058),
 ]
 
-# (budget per step) = ticks_per_step * 17030 * 0.85
-BUDGET = {0: 57_902, 1: 28_951, 2: 57_902, 3: 43_426, 4: 43_426, 5: 43_426}
 
 
 def fx_entry(s, fx):
@@ -67,7 +65,8 @@ def check_budget(fx, steps=300, seeds=(0x4D2A, 0x1357, 0xBEEF)):
     worst = max(cycles)
     median = sorted(cycles)[len(cycles) // 2]
     assert worst < hard, f"worst step {worst} cycles; {ticks} ticks allow {hard}"
-    assert median < BUDGET[fx], f"median step {median} cycles; budget {BUDGET[fx]}"
+    budget = ticks * TICK * 0.85
+    assert median < budget, f"median step {median} cycles; budget {budget:.0f}"
     return worst, median
 
 

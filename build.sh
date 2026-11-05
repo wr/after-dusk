@@ -21,9 +21,9 @@ BASE=vendor/dos33-master-jan83.dsk
 OBJ=build/obj
 mkdir -p "$OBJ"
 
-# Generated sources, once their generators exist.
-for gen in tools/gen_tables.py tools/gen_art.py; do
-  [ -f "$gen" ] && "$PY" "$gen"
+# Generated sources: each tools/gen_*.py writes its own src/*.inc.
+for gen in tools/gen_*.py; do
+  "$PY" "$gen"
 done
 
 # main.s links first so `start` sits at $6000.
