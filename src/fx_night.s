@@ -1,14 +1,19 @@
-; Effect 6: Nightlines, after the original (Shape: Line, Symmetry: Both,
-; Persistence 20). One line between two ends, A and B, drawn four times: as it
-; is and mirrored left-right (x -> 279 - x) and top-bottom (y -> 191 - y). Each
-; end starts near the middle of the screen with a random direction and a speed
-; of 2.5-4.5 dots a step (its x part stretched 1.1 for the IIc's dot shape) and
-; keeps that velocity, going straight on; where it would cross an edge of the
+; Effect 6: Nightlines, after the original (Shape: Line, Symmetry: Both).
+; One line between two ends, A and B, drawn four times: as it is and mirrored
+; left-right (x -> 279 - x) and top-bottom (y -> 191 - y). Each end starts
+; near the middle of the screen with a random direction and a speed of 7-10.5
+; dots a step (its x part stretched 1.1 for the IIc's dot shape) and keeps
+; that velocity, going straight on; where it would cross an edge of the
 ; screen it is put back on the edge and that part of its speed turns round.
-; Each line lies a few dots from the last, so they fan out into bundles of
-; parallel lines that sweep into curved envelopes. The last 20 generations
+; Each line lies several dots from the last, so they fan out into bundles of
+; parallel lines that sweep into curved envelopes. The last 8 generations
 ; stay on screen; each step the oldest is rubbed out first and the newest
 ; drawn whole after it. Drawn straight onto page 1.
+;
+; The original draws 30-35 lines a second and keeps 20. The IIc manages 12
+; steps a second, so the ends go further each step, to keep the original's
+; speed across the screen, and 8 are kept instead of 20: a trail about as
+; long, in time and distance, as the original's.
 ;
 ; One routine draws all four copies of a line at once, walking the line and
 ; setting (or clearing) each dot and its three mirror images. That makes the
@@ -25,11 +30,11 @@
 .import rng_next, rng_below, show_page1, vbl_poll
 .import row_lo, row_hi, xbyte_lo, xmod_lo, xbyte_hi, xmod_hi
 
-KEEP    = 20                    ; generations kept
+KEEP    = 8                     ; generations kept
 XMAX    = 279                   ; the screen's last column...
 YMAX    = 191                   ; ...and row
-SPD_MIN = 81                    ; speed in 1/32 dots a step: 2.53-4.47
-SPD_N   = 63                    ;   (81 + 0..62)
+SPD_MIN = 112                   ; speed in 1/16 dots a step: 7.0-10.5
+SPD_N   = 57                    ;   (112 + 0..56)
 XSTRETCH = 26                   ; x speeds times 1 + 26/256 (1.1)
 
 ; ---- state in FXRAM ----
@@ -71,7 +76,7 @@ T     = FXZ+21                  ; 3
 LIMLO = FXZ+24                  ; the far edge being moved against
 LIMHI = FXZ+25
 EOFF  = FXZ+26                  ; the end being set up: 0 = A, 10 = B
-SPD   = FXZ+27                  ; its speed, 1/32 dots a step
+SPD   = FXZ+27                  ; its speed, 1/16 dots a step
 ANG   = FXZ+28                  ; its direction, 256 a turn
 NEG   = FXZ+29                  ; bit 7: the speed being made is negative
 MUL   = FXZ+30
@@ -173,10 +178,10 @@ trig:   sta T
         lda sines,y
         rts
 
-; scale: P = A Y / 32, negated when carry is set.
+; scale: P = A Y / 16, negated when carry is set.
 scale:  ror NEG
         jsr mul8
-        ldx #5
+        ldx #4
 :       lsr P+1
         ror P
         dex
@@ -216,7 +221,7 @@ sines:  .byte   3,   9,  16,  22,  28,  34,  41,  47,  53,  59,  65,  71,  77,  
 
 ; ================================================================ step
 fx_night_step:
-        lda nl_count            ; all 20 kept: the oldest goes first, so the
+        lda nl_count            ; all 8 kept: the oldest goes first, so the
         cmp #KEEP               ; newest is always drawn whole
         bcc @move
         ldx nl_head

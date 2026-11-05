@@ -8,10 +8,10 @@ from sim import ST_TIMING, VblLatch
 FRAMES = 0x2C                   # timing.s: vertical blanks counted
 
 FX = 6
-KEEP = 20                       # generations kept, 4 lines each
+KEEP = 8                        # generations kept, 4 lines each
 XMAX, YMAX = 279, 191           # the ends bounce off the edges of the whole screen
 XA = 1.1                        # x speeds stretched for the IIc's dot shape
-SPEED = (2.5, 4.5)              # dots a step (x part unstretched)
+SPEED = (7, 10.5)               # dots a step (x part unstretched)
 START_X, START_Y = (125, 155), (85, 107)
 SEEDS = (0x4D2A, 0x1357, 0xBEEF, 0x2468, 0x0F0F, 0x7777)
 
@@ -196,7 +196,7 @@ def test_mirrored_left_right_and_top_bottom_after_every_step(s):
         assert {(x, 191 - y) for x, y in lit} == lit, n
 
 
-def test_keeps_the_last_20_generations(s):
+def test_keeps_the_last_8_generations(s):
     run(s, 100)
     assert s.peek(s.addr("nl_count")) == KEEP
     gens = generations(s)
@@ -273,7 +273,7 @@ def test_starting_speeds_and_directions_vary(built):
             speeds.append(speed(vx, vy))
             signs.add((vx > 0, vy > 0))
             steep.add(abs(vy) > abs(vx / XA))
-    assert min(speeds) < 2.7 and max(speeds) > 4.3
+    assert min(speeds) < 7.3 and max(speeds) > 10.2
     assert len(signs) == 4 and steep == {True, False}
 
 
@@ -310,6 +310,18 @@ def test_ends_bounce_off_the_edges(s, e):
         (1, 0xBE80, 0x0300, 0xBF00),    # y 190.5 heading down: stops at 191
         (1, 0x0080, -0x0300, 0x0000),   # y 0.5 heading up: stops at 0
         (0, 0x11400, 0x0300, 0x11700),  # x 276 heading right at 3: on the edge, no bounce yet
+        # at full speed (10.5 dots, x part stretched: 11.55)
+        (0, 0x11080, 0x0B8D, 0x11700),  # x 272.5 heading right at 11.55: stops at 279
+        (0, 0x0B00, 0x0B8D, 0x168D),    # x 11 heading right: straight on to 22.55
+        (0, 0x0480, -0x0B8D, 0x0000),   # x 4.5 heading left at 11.55: stops at 0
+        (0, 0x0B8D, -0x0B8D, 0x0000),   # x 11.55 heading left: on the edge, no bounce yet
+        (0, 0x0B8E, -0x0B8D, 0x0001),   # just inside it: on to 1/256 of a dot
+        (0, 0x10B73, 0x0B8D, 0x11700),  # x 267.45 heading right: on the edge, no bounce yet
+        (0, 0x10B74, 0x0B8D, 0x11700),  # 1/256 further: over it, back on it
+        (1, 0xB980, 0x0A80, 0xBF00),    # y 185.5 heading down at 10.5: stops at 191
+        (1, 0x0300, -0x0A80, 0x0000),   # y 3 heading up at 10.5: stops at 0
+        (1, 0xB480, 0x0A80, 0xBF00),    # y 180.5 heading down: on the edge, no bounce yet
+        (1, 0xB481, 0x0A80, 0xBF00),    # 1/256 further: over it, back on it
     ]
     for ax, pos, v, want in cases:
         set_axis(s, e, ax, pos, v)

@@ -84,8 +84,10 @@ frames to a deadline. `tests/mame/pacing.lua` checks every effect's real rate. F
 - Flying Toasters: 4 toasters and 3 slices of toast (7 toasters were planned).
 - Warp: 64 stars (70 were planned).
 - Starry Night: up to 85 stars (about 90 were planned; star records must fit one 8-bit index).
-- Nightlines: ends bounce off the edges of the whole screen; a step that rubs out and draws 8
-  lines corner to corner (about 79,000 cycles) still fits 5 ticks.
+- Nightlines: 8 generations kept (the original keeps 20, drawing 30-35 lines a second against
+  12 steps here, so the ends go 7-10.5 dots a step to match its speed); ends bounce off the edges
+  of the whole screen; a step that rubs out and draws 8 lines corner to corner (about 79,000
+  cycles) still fits 5 ticks.
 - String Theory: 2 ribbons of 24 strings at 6 ticks; its own unrolled line routine (`str_line`),
   about twice as fast as `fline` on long lines.
 
