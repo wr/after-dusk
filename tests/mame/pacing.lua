@@ -21,7 +21,7 @@ T.run(function()
         -- Zot! has no motion: a bolt may take a few frames to draw (accepted
         -- in its design), so it runs a little under its rate.
         local slack = (fx == 3) and 0.2 or 0.03
-        T.info(string.format("effect %d: %d steps in 300 frames (want %d)", fx, steps, want))
+        T.info(string.format("effect %d: %d steps in 300 frames (want %.1f)", fx, steps, want))
         T.check(steps <= want * 1.03 and steps >= want * (1 - slack),
                 "effect " .. fx .. " runs at the wrong rate")
         seen[fx] = true
