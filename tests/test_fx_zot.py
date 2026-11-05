@@ -7,7 +7,7 @@ from sim import PAGE1, ST_TIMING, VblLatch
 
 FX = 3
 HOLD = range(14, 25)            # steps a bolt stays up: about a second at 20 steps a second
-PAUSE = range(50, 86)           # steps from one bolt going to the next: 2.5-4.3 seconds
+PAUSE = range(30, 61)           # steps from one bolt going to the next: 1.5-3 s, so one starts every 2.2-4.2 s
 SEEDS = (0x4D2A, 0x1357, 0xBEEF)
 
 
@@ -112,7 +112,7 @@ def test_a_bolt_every_few_seconds(built):
     print("pauses", sorted(pauses))
     assert len(pauses) >= 30
     assert all(p in PAUSE for p in pauses)
-    assert min(pauses) <= 55 and max(pauses) >= 80
+    assert min(pauses) <= 35 and max(pauses) >= 55        # spread across the range
 
 
 def test_trunk(s):

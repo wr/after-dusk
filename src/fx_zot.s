@@ -137,11 +137,11 @@ fx_zot_step:
         lda #2
         sta zot_hold
         rts
-:       stz zot_phase           ; done; pause 50-85 steps
-        lda #36
+:       stz zot_phase           ; done; pause 30-60 steps, so a bolt starts
+        lda #31                 ; every 2.2-4.2 seconds, as in the original
         jsr rng_below
         clc
-        adc #50
+        adc #30
         sta zot_wait
         rts
 
