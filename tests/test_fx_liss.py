@@ -1,12 +1,12 @@
 import pytest
 
-from fxcommon import ALLOWED, check_bit7, check_budget, check_in_bounds, run, start
+from fxcommon import ALLOWED, check_bit7, check_budget, check_in_bounds, fx_entry, run, start
 
 FX = 5
 KEEP = 100                      # lines kept on screen
 QUARTER = range(61, 69)         # step round the ellipse, 256 = a full turn: about a quarter turn
 THIRD = range(81, 88)           # ... or, now and then, about a third
-PH_STEP = 0x1A                  # tilt drift per step, 8.8
+PH_STEP = 0x73                  # tilt drift per step, 8.8: 0.011 radians, the original's
 
 
 @pytest.fixture
@@ -16,6 +16,10 @@ def s(built):
 
 def step_angle(s):
     return s.peek16(s.addr("lis_dth")) >> 8
+
+
+def test_draws_30_lines_a_second(built):
+    assert fx_entry(start(FX), FX)[3] == 2             # ticks a step: 60 / 2
 
 
 def test_budget(built):

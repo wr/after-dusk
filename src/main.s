@@ -172,9 +172,9 @@ normalize_display:
 ; Without vertical blank (the cycle-counted fallback), ticks to wait after
 ; each effect's step: its ticks minus its typical work (measured medians:
 ; toasters 2.7 ticks, Warp 1.6, Starry Night 0.1, Zot! idle, worms 2.1,
-; Lissajous 1.0, Nightlines 1.6, String Theory 2.2, Rose 1.4, Doodles 0.25).
+; Lissajous 0.9, Nightlines 1.6, String Theory 2.2, Rose 1.4, Doodles 0.25).
 fx_slow:
-        .byte 1, 0, 4, 3, 1, 2, 3, 4, 1, 2, 30, 8, 2, 1      ; 10-13: empty for now; set once measured
+        .byte 1, 0, 4, 3, 1, 1, 3, 4, 1, 2, 30, 8, 2, 1      ; 10-13: empty for now; set once measured
 
 ; Per effect: where it is in aux memory and its size, wipe first (1/0),
 ; ticks per step. The FX file is effects 0, 1, 2... one after another.
@@ -192,7 +192,7 @@ fx_table:
         .word __FX4_LOAD__, __FX4_SIZE__
         .byte 0, 3              ; 4 Can of Worms
         .word __FX5_LOAD__, __FX5_SIZE__
-        .byte 1, 3              ; 5 Lissajous
+        .byte 1, 2              ; 5 Lissajous
         .word __FX6_LOAD__, __FX6_SIZE__
         .byte 1, 5              ; 6 Nightlines
         .word __FX7_LOAD__, __FX7_SIZE__

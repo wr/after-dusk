@@ -2,9 +2,10 @@
 ; at a time round a tilted ellipse, x = 140 + 127 sin(t), y = 96 + 86 sin(t +
 ; phase), and each is joined to the last by a straight line. The last 100
 ; lines stay on screen, so they make slowly turning near-squares round an
-; empty middle. The phase (the tilt) drifts, so the ellipse fattens, thins
-; and turns over; every 400 steps the jump is picked again, now and then a
-; third of a turn instead. Drawn straight onto page 1.
+; empty middle. 30 lines a second, as in the original. The phase (the tilt)
+; drifts 0.011 radians a line, as fast as the original's, so the ellipse
+; fattens, thins and turns over; every 400 steps the jump is picked again,
+; now and then a third of a turn instead. Drawn straight onto page 1.
 
 .include "config.inc"
 
@@ -15,7 +16,7 @@
 
 CAP     = 101                   ; points kept: 100 lines
 REPICK  = 400                   ; steps between new jumps
-PH_STEP = $1A                   ; tilt drift a step, 8.8 (0.0025 radians)
+PH_STEP = $73                   ; tilt drift a step, 8.8 (0.011 radians)
 
 ; ---- state in FXRAM ----
 lis_xl    = FXRAM               ; point ring: x lo, x hi, y
