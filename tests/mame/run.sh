@@ -7,7 +7,7 @@ set -u
 cd "$(dirname "$0")/../.."
 drv=$1 script=$2 secs=$3 disk=${4:-build/AFTERDUSK.dsk}
 
-if [ ! -d .tools/roms/"$drv" ] && [ ! -d .tools/roms/apple2c ]; then
+if [ ! -d .tools/roms/"$drv" ]; then
   echo "SKIP: no emulator ROMs in .tools/roms (see tests/README.md)"
   exit 77
 fi

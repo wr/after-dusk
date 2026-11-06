@@ -25,6 +25,10 @@ def test_boot(built):
     run_mame("boot.lua", 75)
 
 
+def test_boots_on_enhanced_iie(built):
+    run_mame("iie.lua", 75, driver="apple2ee")
+
+
 def test_timing(built):
     run_mame("timing.lua", 75)
 

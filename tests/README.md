@@ -42,6 +42,21 @@ folder. The character ROM, keyboard ROM and speech-chip ROM are zero-filled plac
 Dusk shows no text and only checks that some key was pressed, so the tests don't need them. MAME
 reports wrong checksums and "might not run correctly", and runs anyway.
 
+One test (`iie.lua`) also boots an enhanced IIe, if its ROMs are there:
+
+```
+.tools/roms/apple2ee/   342-0304-a.e10  342-0303-a.e8  342-0265-a.chr  341-0132-d.e12
+```
+
+The two 8K system ROMs are the second 16K of `APPLE2E.ROM` in `apple_iie_rom.zip` (same folder),
+in that order; the character and keyboard ROMs are placeholders again. The IIe, unlike the IIc,
+boots through the Disk II card's P5 PROM, and the archive's file named `...P5 - 341-0027.bin` has
+data bits D4-D7 swapped: use `...P5 - 341-0027.bin-with-D4-D7 data bits swapped.bin`, which matches
+MAME's checksum, in `.tools/roms/a2diskiing/`.
+
+MAME's IIgs can't be used: it runs the IIgs's keyboard microcontroller, whose ROM
+(`341s0632-2.bin`) isn't in the archive, and without it the IIgs stops at "Fatal system error".
+
 ### The long ones
 
 - `pacing.lua` checks every effect's real rate (steps per 300 frames) on the release disk.

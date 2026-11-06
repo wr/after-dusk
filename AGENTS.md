@@ -12,6 +12,8 @@ Guidance for coding agents (Claude Code via `CLAUDE.md`, Codex) working in this 
 After Dusk is a boot disk for the Apple IIc that goes straight into an After Dark-style screen saver
 randomizer. It cycles black-and-white hi-res effects (see Effect ids below) in random order, about
 3 minutes each, until the machine is switched off. Any key skips to the next effect. It is silent.
+It also runs on an enhanced IIe with 128K (tested in MAME), where `timing_init` finds no
+vertical-blank latch, so every effect is paced by the cycle-counted fallback.
 
 The resident 65C02 program, `AFTERDUSK`, loads at `$6000` from a DOS 3.3 disk. Every effect is
 linked into one more file, `FX`, which HELLO loads at `$2000` just before `BRUN AFTERDUSK`.
@@ -26,6 +28,7 @@ tools/bootstrap.sh                 # once: .tools/venv (py65, pytest, Pillow) + 
 FX_TICKS=120 OUT=build/AFTERDUSK-test.dsk ./build.sh   # 2-second effects, for emulator tests
 .tools/venv/bin/pytest tests -q    # host tests (py65 simulator) + emulator tests if ROMs exist
 tests/mame/run.sh apple2c tests/mame/boot.lua 30       # one emulator test
+tools/make-gifs.sh                 # the README's animations: docs/screenshots/*.gif, from MAME
 tools/install-sd.sh                # put build/AFTERDUSK.dsk on a FloppyEmu SD card
 ```
 
