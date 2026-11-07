@@ -8,10 +8,15 @@ def test_disk_size(built):
     assert (built / "AFTERDUSK.dsk").stat().st_size == 143360
 
 
-def test_catalog(built):
+def catalog(built):
+    """{name: type} for every file on the disk."""
     out = subprocess.run([dos33(), str(built / "AFTERDUSK.dsk"), "CATALOG"],
                          check=True, capture_output=True, text=True).stdout
-    entries = {m.group(2): m.group(1) for m in re.finditer(r"^\s*\*?\s*([ABTI])\s+\d+\s+(\S+)", out, re.M)}
+    return {m.group(2): m.group(1) for m in re.finditer(r"^\s*\*?\s*([ABTI])\s+\d+\s+(\S+)", out, re.M)}
+
+
+def test_catalog(built):
+    entries = catalog(built)
     assert entries.get("HELLO") == "A"
     assert entries.get("AFTERDUSK") == "B"
     assert entries.get("SEED") == "T"
@@ -23,6 +28,11 @@ def test_load_address_and_size(built):
     assert "restart" in labels()
     assert (built / "afterdusk.bin").stat().st_size <= 0x2800    # $6000-$87FF
     assert (built / "fx.bin").stat().st_size <= 0x4000           # $2000-$5FFF
+
+
+def test_disk_has_fx2(built):
+    assert catalog(built).get("FX2") == "B"
+    assert (built / "fx2.bin").stat().st_size <= 0x4000          # aux $6000-$9FFF
 
 
 def test_no_speaker_refs():

@@ -1,20 +1,21 @@
 ; After Dusk: start-up and the randomizer.
 ;
-; start (from BRUN) and restart (from Ctrl-Reset) set up the machine, then
+; start (from HELLO) and restart (from Ctrl-Reset) set up the machine, then
 ; the randomizer runs forever: pick an effect that isn't the current one,
 ; wipe the screen first if the effect wants that, call its init once, then
 ; its step every ticks_per_step ticks until a key is pressed or FX_TICKS
 ; ticks have passed.
 ;
-; The effects themselves aren't in this program. HELLO loads them all (the FX
-; file) at $2000 before BRUN; start copies that to aux memory, and each
-; effect is copied from there into the overlay slot at $8800 when its turn
-; comes. See after-dusk.cfg.
+; The effects themselves aren't in this program. They come in two files that
+; HELLO loads at $2000 one after the other, once it has loaded this program:
+; FX2 first, which it hands to fx2_stash (at $6003) to copy to aux $6000;
+; then FX, which start copies to aux $2000. Each effect is copied from aux
+; into the overlay slot at $8800 when its turn comes. See after-dusk.cfg.
 
 .include "config.inc"
 
 .export start, restart, begin_effect, step_once, pick_next, normalize_display
-.export fx_table, fx_count, fx_stash, lc_install, load_fx
+.export fx_table, fx_count, fx_stash, fx2_stash, lc_install, load_fx, aux_fetch
 
 .import timing_init, wait_ticks, timing_sync, rng_seed, rng_below, key_pressed
 .import clear_page, copy_page, show_page1, wipe_to_black, plot
@@ -27,17 +28,22 @@
 .import __FX8_LOAD__, __FX8_SIZE__, __FX9_LOAD__, __FX9_SIZE__
 .import __FX10_LOAD__, __FX10_SIZE__, __FX11_LOAD__, __FX11_SIZE__
 .import __FX12_LOAD__, __FX12_SIZE__, __FX13_LOAD__, __FX13_SIZE__
+.import __FX14_LOAD__, __FX14_SIZE__
 
 FXOFF   = CORE+6        ; current effect's offset into fx_table (id * 6)
-LSRC    = DSX+12        ; 2: copy source (drawing scratch, free between effects)
-LDST    = DSX+14        ; 2: copy destination
+F2SRC   = $06           ; 2: fx2_stash's source, in zero page that
+F2DST   = $08           ; 2: Applesoft and DOS leave free
 
 SOFTEV  = $03F2         ; reset vector, and its check byte at $03F4
 PWREDUP = $03F4
 
 .segment "CODE"
 
-start:                          ; BRUN enters here ($6000)
+; HELLO enters at fixed addresses, so they lead the program.
+start:  jmp boot                ; CALL 24576 ($6000), once FX is loaded
+        jmp fx2_stash           ; CALL 24579 ($6003), once FX2 is loaded
+
+boot:
         sei
         jsr fx_stash            ; the effects, before anything clears the screen
         jsr setup
@@ -173,12 +179,14 @@ normalize_display:
 ; each effect's step: its ticks minus its typical work (measured medians:
 ; toasters 2.7 ticks, Warp 1.6, Starry Night 0.1, Zot! idle, worms 1.7,
 ; Lissajous 0.9, Nightlines 1.6, String Theory 2.2, Rose 1.4, Doodles 0.26,
-; Shapes 1.3, Spheres 1.2, Bouncing Ball 0.4, Rainstorm 2.3).
+; Shapes 1.3, Spheres 1.2, Bouncing Ball 0.4, Rainstorm 2.3, Fish! idle
+; (so far only its floor)).
 fx_slow:
-        .byte 1, 0, 4, 3, 1, 1, 3, 4, 1, 2, 2, 3, 2, 1
+        .byte 1, 0, 4, 3, 1, 1, 3, 4, 1, 2, 2, 3, 2, 1, 1
 
 ; Per effect: where it is in aux memory and its size, wipe first (1/0),
-; ticks per step. The FX file is effects 0, 1, 2... one after another.
+; ticks per step. The FX file is effects 0-13 one after another from aux
+; $2000; FX2 is effect 14 on, from aux $6000.
 fx_count:
         .byte NFX
 fx_table:
@@ -210,10 +218,12 @@ fx_table:
         .byte 1, 2              ; 12 Bouncing Ball
         .word __FX13_LOAD__, __FX13_SIZE__
         .byte 1, 3              ; 13 Rainstorm
+        .word __FX14_LOAD__, __FX14_SIZE__
+        .byte 1, 1              ; 14 Fish!
 
 ; ---------------------------------------------------------------- loader
 ; fx_stash: copy main $2000-$5FFF, where HELLO loaded the FX file, to the
-; same addresses in aux memory. Once, at BRUN; Ctrl-Reset keeps the copy.
+; same addresses in aux memory. Once, at start; Ctrl-Reset keeps the copy.
 fx_stash:
         stz LSRC
         lda #>FXSTORE
@@ -263,6 +273,35 @@ load_fx:
         adc #0
         tax                     ; never 0: every overlay starts with two jmps
         jmp aux_fetch           ; (0 would copy 256 pages over everything)
+
+.segment "ONCE"
+; Run once, from BASIC, so it sits after all the resident code: code added
+; here doesn't move the drawing routines' loops, whose timing can depend on
+; where they cross page boundaries.
+; fx2_stash: copy main $2000-$5FFF, where HELLO has just loaded the FX2 file,
+; to aux $6000-$9FFF. HELLO calls it from BASIC before loading FX over the
+; same memory, so it keeps to zero page $06-$09, leaves interrupts as they
+; are, and returns to BASIC with writes back on main.
+fx2_stash:
+        ldy #0
+        sty F2SRC
+        sty F2DST
+        lda #>FXSTORE
+        sta F2SRC+1
+        lda #>FXSTORE2
+        sta F2DST+1
+        sta WRCARDRAM           ; writes to aux; reads (and this code) main
+@copy:  lda (F2SRC),y
+        sta (F2DST),y
+        iny
+        bne @copy
+        inc F2SRC+1
+        inc F2DST+1
+        lda F2DST+1
+        cmp #>FXSTORE2_END
+        bne @copy
+        sta WRMAINRAM
+        rts
 
 .segment "LCCODE"
 ; aux_fetch: copy X pages from aux memory at LSRC to main memory at LDST.

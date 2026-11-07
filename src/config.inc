@@ -33,6 +33,8 @@ FXZ     = $40
 ; After Dusk never returns to BASIC or DOS (Ctrl-Reset restarts it), so the
 ; upper zero page is ours.
 DSX     = $80
+LSRC    = DSX+12              ; 2: aux_fetch's source (drawing scratch: free while nothing draws)
+LDST    = DSX+14              ; 2: aux_fetch's destination
 
 ; ---- zero page: extra sprite-engine scratch ($90-$9F, sprite.s) ----
 SPX     = $90
@@ -50,11 +52,13 @@ ST_FAST   = $0315             ; 1 = IIc Plus (4 MHz) detected
 KEYHELD   = $0316             ; 1 while the key that last skipped is still down
 
 ; ---- effects: kept in aux memory, run one at a time in the overlay slot ----
-NFX       = 14                ; effects
+NFX       = 15                ; effects
 OVL       = $8800             ; overlay slot, $8800-$95FF: jmp init at OVL,
 OVL_STEP  = OVL+3             ; jmp step at OVL+3
 FXSTORE   = $2000             ; the FX file: main $2000-$5FFF at boot, then aux
 FXSTORE_END = $6000
+FXSTORE2  = $6000             ; the FX2 file: main $2000-$5FFF at boot, then
+FXSTORE2_END = $A000          ; aux $6000-$9FFF
 
 ; ---- IIc memory switches ----
 RDMAINRAM = $C002             ; reads of $0200-$BFFF from main memory
@@ -65,6 +69,17 @@ WRCARDRAM = $C005             ; writes to aux
 ; ---- RAM private to the running effect ----
 FXRAM     = $0800             ; $0800-$1FFF
 FXRAM_END = $2000
+
+; ---- Fish! (effect 14): main memory while it runs ----
+; Page 1 is the only page it shows; its art sits in page 2. FISH_FLOOR and
+; FISH_ART are copied from FX2 in whole pages, so each copy runs on to the
+; end of its last page.
+FISH_ART   = $4000            ; $4000-$5DFF every frame of every kind
+FISH_BG    = $0800            ; $0800-$0D9F live background: rows 156-191, 40 bytes each
+FISH_REV   = $0DA0            ; $0DA0-$0E1F 7-bit bit-reverse table
+FISH_FLOOR = $0F00            ; $0F00-$149F the floor alone (copy runs to $14FF)
+FISH_SHT   = $1500            ; $1500-$1BFF shift tables: shift k in page $15+k
+FISH_STATE = $1C00            ; $1C00-$1FFF creatures and scheduler
 
 ; ---- tables built at start-up in the language card (after the sprites) ----
 sar4    = $F000

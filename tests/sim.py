@@ -110,8 +110,12 @@ class Sim:
         self.mem.ram[a + 1] = v >> 8
 
     def load_effects(self):
-        """As HELLO and start do: the FX file at $2000, copied to aux memory,
-        both pages cleared, and the aux copy loop in the language card."""
+        """As HELLO and start do: the FX2 file at $2000, copied to aux $6000;
+        the FX file at $2000, copied to aux $2000; both pages cleared, and the
+        aux copy loop in the language card."""
+        data = (BUILD / "fx2.bin").read_bytes()
+        self.mem.ram[0x2000:0x2000 + len(data)] = data
+        self.call("fx2_stash", max_cycles=2_000_000)
         data = (BUILD / "fx.bin").read_bytes()
         self.mem.ram[0x2000:0x2000 + len(data)] = data
         self.call("fx_stash", max_cycles=2_000_000)

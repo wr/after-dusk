@@ -76,8 +76,11 @@ end
 
 -- Wait for After Dusk to start: DOS loads the whole program from disk first,
 -- which takes a while (and longer when HELLO has to create the SEED file).
+-- HELLO calls into the program once on the way (fx2_stash, with the screen
+-- still in text), so started means running with hi-res on.
 function T.wait_started()
-  return T.check(T.wait_until(T.running, 60 * 60), "After Dusk never started")
+  return T.check(T.wait_until(function() return T.running() and T.hires_on() end, 60 * 60),
+                 "After Dusk never started")
 end
 
 -- True once After Dusk is running: its code is executing.
