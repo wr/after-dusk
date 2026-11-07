@@ -576,6 +576,20 @@ def test_background_job_resumes_at_any_row(r):
                 assert got[i] == (want[i] if inside else bg[i]), (specs, rect, row, col)
 
 
+def test_background_job_stops_at_the_bottom_row(r):
+    """A rect reaching past row 191 rebuilds rows 156-191 and writes nothing
+    past FISH_BG (rows below it would land in FISH_REV)."""
+    clear(r)
+    place(r, [(10, 0, 0, 100, 156)])
+    for r1 in (192, 194, 200, 255):
+        r.start_tracking()
+        rebuild_bg(r, (14, 22, 150, r1))
+        r.mem.track = False
+        past = range(r.addr("FISH_BG") + FLOOR_BYTES, r.addr("FISH_CODE2"))
+        assert not [w for w in r.mem.written if w in past], r1
+        assert fishref.fish_bg(r) == fishref.expected_bg(r), r1
+
+
 def test_background_job_survives_creature_rects(r):
     """Creature rects begun, drawn and finished between two fish_bg_rows calls
     don't disturb the background job."""

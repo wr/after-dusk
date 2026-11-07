@@ -33,8 +33,9 @@ FXZ     = $40
 ; After Dusk never returns to BASIC or DOS (Ctrl-Reset restarts it), so the
 ; upper zero page is ours.
 DSX     = $80
-LSRC    = DSX+12              ; 2: aux_fetch's source (drawing scratch: free while nothing draws)
-LDST    = DSX+14              ; 2: aux_fetch's destination
+LSRC    = DSX+12              ; 2: aux_fetch's and aux_copy's source, and
+LDST    = DSX+14              ; 2: destination: drawing scratch, set just before each call
+                              ; (Fish!'s background job does it mid-row)
 
 ; ---- zero page: extra sprite-engine scratch ($90-$9F, sprite.s) ----
 SPX     = $90

@@ -275,7 +275,7 @@ FC_BGCALL  = 11
 FC_BGSETUP = 20
 FC_BGANY   = 5
 FC_BGSLOT  = 41
-FC_BGROW   = 29
+FC_BGROW   = 30                 ; (a row's vbl_poll: 26 here, 32-44 on a IIc with the latch)
 FC_BGWROW  = 45
 FC_BGSCAN  = 6
 FC_BGSCANPER = 7
@@ -1439,8 +1439,11 @@ fish_bg_begin:
         sta bj_c0
         lda FR_C1
         sta bj_c1
-        lda FR_R1
-        sta bj_r1
+        lda FR_R1               ; rows up to 191 (FISH_REV follows FISH_BG)
+        cmp #192
+        bcc :+
+        lda #192
+:       sta bj_r1
         lda FR_R0
         cmp #FLOOR_TOP
         bcs :+
