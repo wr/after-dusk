@@ -2,41 +2,47 @@
 ; over a sea floor (the randomizer wipes first).
 ;
 ; Its code, art and floor all live in FX2, behind the code. init copies the
-; art into page 2, which Fish! never shows, and after it the drawing code
-; that doesn't fit the overlay (FISHCODE); copies the floor into FXRAM;
-; builds the tables the drawing needs; and draws the floor across the bottom
-; of page 1. The row renderer (fish_draw.inc) draws creatures from the state
-; arrays; nothing moves them yet, and the step does nothing.
+; art into page 2, which Fish! never shows, the code that doesn't fit the
+; overlay to page 2 (FISHCODE) and FXRAM (FISHCODE2), builds the tables the
+; drawing needs, builds FISH_BG from the floor (which stays in aux) with the
+; background job, and draws it across the bottom of page 1. The row renderer
+; (fish_draw.inc) draws creatures from the state arrays; nothing moves them
+; yet, and the step does nothing.
 
 .include "config.inc"
 
 .export fish_init, fish_step
-.export FISH_BG, FISH_FLOOR, FISH_SHT, FISH_REV, FISH_IREV, FLOOR_TOP
+.export FISH_BG, FISH_CODE2, FISH_SHT, FISH_REV, FISH_IREV, FLOOR_TOP
 .export fish_n, fish_kind, fish_frame, fish_dir, fish_xl, fish_xh, fish_yl, fish_yh
-.export FISH_MAX, fish_box, fish_rect_begin, fish_rect_rows, fish_bg_rect
+.export FISH_MAX, fish_box, fish_rect_begin, fish_rect_rows, fish_bg_begin, fish_bg_rows
+.export fish_bg_floor
 .export FR_C0, FR_C1, FR_R0, FR_R1, FR_ROW, FR_LEFT, FR_ZP_END, FISH_RD_END
 .export FC_CALL, FC_EVENT, FC_EVPER, FC_SETUP, FC_PATCH, FC_SWITCH, FC_EMPTY
 .export FC_SEA_N, FC_SEA_M, FC_FLR_N, FC_FLR_M, FC_MIX, FC_MIXPER, FC_MIXNP
-.export FC_BEGIN, FC_BEGPER, FC_BEGFAR, FC_BGROW, FC_BGWEED, FC_BGWROW
+.export FC_BEGIN, FC_BEGPER, FC_BEGFAR
+.export FC_BGBEGIN, FC_BGCALL, FC_BGSETUP, FC_BGANY, FC_BGSLOT, FC_BGROW, FC_BGWROW
+.export FC_BGSCAN, FC_BGSCANPER
 
-.import aux_fetch, vbl_poll, row_lo, row_hi, xbyte_lo, xbyte_hi, xmod_lo, xmod_hi
+.import aux_fetch, aux_copy, vbl_poll, row_lo, row_hi, xbyte_lo, xbyte_hi, xmod_lo, xmod_hi
 .import __FISHART_LOAD__, __FISHART_RUN__, __FISHART_SIZE__
-.import __FISHFLOOR_LOAD__, __FISHFLOOR_RUN__, __FISHFLOOR_SIZE__
+.import __FISHFLOOR_LOAD__
 .import __FISHCODE_LOAD__, __FISHCODE_RUN__, __FISHCODE_SIZE__
+.import __FISHCODE2_LOAD__, __FISHCODE2_RUN__, __FISHCODE2_SIZE__
 
 FLOOR_TOP   = 156               ; the floor is the bottom 36 rows
 FLOOR_BYTES = (192 - FLOOR_TOP) * 40
 
 ; The memory map in config.inc, held to what the linker and the art need.
 .assert __FISHART_RUN__ = FISH_ART, lderror, "FISHRAM must start at FISH_ART"
-.assert __FISHFLOOR_RUN__ = FISH_FLOOR, lderror, "FLOORRAM must start at FISH_FLOOR"
 .assert __FISHCODE_RUN__ = FISH_CODE, lderror, "FISHCODEMEM must start at FISH_CODE"
+.assert __FISHCODE2_RUN__ = FISH_CODE2, lderror, "FISHCODE2MEM must start at FISH_CODE2"
+.assert __FISHCODE2_SIZE__ > 0, lderror, "FISHCODE2 can't be empty: init copies whole pages of it"
 .assert __FISHART_RUN__ + __FISHART_SIZE__ <= FISH_BLKB, lderror, "the art runs into block B"
 .assert FISH_BG + FLOOR_BYTES <= FISH_REV, error, "FISH_BG runs into FISH_REV"
 .assert FISH_REV + 128 <= FISH_IREV, error, "FISH_REV runs into FISH_IREV"
-.assert FISH_IREV + 128 <= FISH_FLOOR, error, "FISH_IREV runs into FISH_FLOOR"
+.assert FISH_IREV + 128 <= FISH_CODE2, error, "FISH_IREV runs into FISH_CODE2"
 .assert (FISH_REV & $7F) = 0 && (FISH_IREV & $7F) = 0, error, "REV and IREV must start on a half page"
-.assert FISH_FLOOR + $0600 <= FISH_SHT, error, "FISH_FLOOR's copy runs into FISH_SHT"
+.assert FISH_CODE2 + $0600 <= FISH_SHT, error, "FISH_CODE2 runs into FISH_SHT"
 .assert FISH_SHT + 7 * 256 <= FISH_STATE, error, "FISH_SHT runs into FISH_STATE"
 
 ; ---- zero page ----
@@ -82,20 +88,21 @@ fish_init:
         sta LDST+1
         ldx #>(__FISHCODE_SIZE__ + 255)
         jsr aux_fetch
-        lda #<__FISHFLOOR_LOAD__        ; the floor, into FXRAM
+        lda #<__FISHCODE2_LOAD__        ; and more code, into FXRAM
         sta LSRC
-        lda #>__FISHFLOOR_LOAD__
+        lda #>__FISHCODE2_LOAD__
         sta LSRC+1
-        lda #<__FISHFLOOR_RUN__
+        lda #<__FISHCODE2_RUN__
         sta LDST
-        lda #>__FISHFLOOR_RUN__
+        lda #>__FISHCODE2_RUN__
         sta LDST+1
-        ldx #>(__FISHFLOOR_SIZE__ + 255)
+        ldx #>(__FISHCODE2_SIZE__ + 255)
         jsr aux_fetch
         jsr make_sht
         jsr make_rev
+        stz fish_n              ; no creatures yet
         jsr fish_draw_init
-        jsr floor_to_bg
+        jsr fish_bg_floor       ; FISH_BG: the floor
         jmp bg_to_screen
 
 ; ================================================================ step
@@ -160,22 +167,6 @@ make_rev:
         sta FISH_IREV,x
         dex
         bpl @b
-        rts
-
-; floor_to_bg: the live background starts as the floor alone.
-floor_to_bg:
-        ldx #0
-@copy:
-.repeat FLOOR_BYTES / 256, p
-        lda FISH_FLOOR + p * 256,x
-        sta FISH_BG + p * 256,x
-.endrepeat
-        cpx #<FLOOR_BYTES       ; the last, partial page
-        bcs :+
-        lda FISH_FLOOR + (FLOOR_BYTES & $FF00),x
-        sta FISH_BG + (FLOOR_BYTES & $FF00),x
-:       inx
-        bne @copy
         rts
 
 ; bg_to_screen: draw FISH_BG on page 1, rows FLOOR_TOP-191.

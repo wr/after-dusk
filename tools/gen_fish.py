@@ -87,6 +87,7 @@ def pad_before(offset, kind):
     aligned) so that no wb-byte run starting at its lit rows or at its mask
     rows crosses a page: the drawing code patches one high byte for a run."""
     n, wb = kind["rows"] * kind["wb"], kind["wb"]
+    assert n < 256, f"{kind['name']}: rows x wb = {n}: the drawing code's place in a frame is a byte"
     p = 0
     while ((offset + p) & 0xFF) + wb > 0x100 or ((offset + p + n) & 0xFF) + wb > 0x100:
         p += 1

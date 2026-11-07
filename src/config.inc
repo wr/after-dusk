@@ -71,16 +71,17 @@ FXRAM     = $0800             ; $0800-$1FFF
 FXRAM_END = $2000
 
 ; ---- Fish! (effect 14): main memory while it runs ----
-; Page 1 is the only page it shows; its art sits in page 2. FISH_FLOOR and
-; FISH_ART are copied from FX2 in whole pages, so each copy runs on to the
-; end of its last page.
+; Page 1 is the only page it shows; its art sits in page 2. FISH_ART and
+; its code (FISH_CODE, FISH_CODE2) are copied from FX2 in whole pages, so
+; each copy runs on to the end of its last page. The floor stays in FX2, in
+; aux; FISH_BG is built from it.
 FISH_ART   = $4000            ; $4000-$5D1F every frame of every kind (copy runs to $5DFF)
 FISH_BLKB  = $5D20            ; $5D20-$5DA7 a copy of the drawing code's block A, made at init
 FISH_CODE  = $5E00            ; $5E00-$5FFF the drawing code that won't fit the overlay
 FISH_BG    = $0800            ; $0800-$0D9F live background: rows 156-191, 40 bytes each
 FISH_REV   = $0E00            ; $0E00-$0E7F 7-bit bit-reverse table, and
 FISH_IREV  = $0E80            ; $0E80-$0EFF the same inverted (half pages: lookups never cross)
-FISH_FLOOR = $0F00            ; $0F00-$149F the floor alone (copy runs to $14FF)
+FISH_CODE2 = $0F00            ; $0F00-$14FF code: Fish!'s that won't fit the overlay
 FISH_SHT   = $1500            ; $1500-$1BFF shift tables: shift k in page $15+k
 FISH_STATE = $1C00            ; $1C00-$1FFF creatures and scheduler
 

@@ -58,7 +58,15 @@ def test_init_copies_art_and_floor(s):
             assert bytes(s.mem.ram[at:at + 2 * n]) == want, (k, f)
     floor = bytes(b for row in art()["floor"] for b in row)
     assert len(floor) == FLOOR_BYTES
-    assert mem(s, "FISH_FLOOR", FLOOR_BYTES) == floor
+    a = s.addr("__FISHFLOOR_LOAD__")            # the floor stays in aux, in FX2
+    assert bytes(s.mem.aux[a:a + FLOOR_BYTES]) == floor
+    assert mem(s, "FISH_BG", FLOOR_BYTES) == floor
+    # the code copied to FISH_CODE2 is FX2's FISHCODE2
+    a = s.addr("__FISHCODE2_LOAD__") - 0x6000
+    size = s.addr("__FISHCODE2_SIZE__")
+    assert 0 < size <= 0x600
+    assert mem(s, "__FISHCODE2_RUN__", size) == data[a:a + size]
+    assert s.addr("__FISHCODE2_RUN__") == s.addr("FISH_CODE2")
 
 
 def test_tables(s):
@@ -79,7 +87,7 @@ def test_floor_on_screen(s):
         a = row_base(FLOOR_TOP + r)
         assert bytes(s.mem.ram[a:a + 40]) == bytes(floor[r]), FLOOR_TOP + r
     assert visible(s, PAGE1)[:FLOOR_TOP * 40] == bytes(FLOOR_TOP * 40)
-    assert mem(s, "FISH_BG", FLOOR_BYTES) == mem(s, "FISH_FLOOR", FLOOR_BYTES)
+    assert mem(s, "FISH_BG", FLOOR_BYTES) == bytes(b for row in floor for b in row)
 
 
 def test_init_writes_only_its_own_memory(built):
@@ -187,9 +195,16 @@ def redraw(s, rect, left=0xFFFF):
     return cycles, s.carry()
 
 
-def rebuild_bg(s, rect):
+def rebuild_bg(s, rect, left=0xFFFF):
+    """fish_bg_begin, then fish_bg_rows with budget `left` until it's done:
+    total cycles."""
     set_rect(s, rect)
-    return s.call("fish_bg_rect", max_cycles=200_000)
+    cycles = s.call("fish_bg_begin")
+    while True:
+        s.poke16(s.addr("FR_LEFT"), left)
+        cycles += s.call("fish_bg_rows", max_cycles=400_000)
+        if s.carry():
+            return cycles
 
 
 def redraw_all(s):
@@ -472,3 +487,237 @@ def test_frames_never_cross_a_page(r):
             lit = r.addr(f"fk_frame{k}_{f}")
             for a in (lit, lit + kind["rows"] * kind["wb"]):
                 assert (a & 0xFF) + kind["wb"] <= 0x100, (k, f, hex(a))
+
+
+def test_an_abandoned_or_finished_rect_is_done(r):
+    """fish_rect_rows on a rect that is finished, or that fish_rect_begin or
+    the background job abandoned, returns carry set at once and draws
+    nothing."""
+    clear(r)
+    place(r, [(0, 0, 0, 100, 60), (10, 0, 0, 100, 156)])
+    rect = box(r, 0)[1]
+    for abandon in ("finished", "fish_bg_begin", "fish_bg_rows"):
+        clear(r)
+        place(r, [(0, 0, 0, 100, 60), (10, 0, 0, 100, 156)])
+        set_rect(r, rect)
+        r.call("fish_rect_begin")
+        r.poke16(r.addr("FR_LEFT"), 120)        # a row or two, then it stops
+        r.call("fish_rect_rows")
+        if abandon == "finished":
+            r.poke16(r.addr("FR_LEFT"), 0xFFFF)
+            r.call("fish_rect_rows")
+            assert r.carry()
+        else:
+            set_rect(r, box(r, 1)[1])
+            r.call("fish_bg_begin")
+            if abandon == "fish_bg_rows":
+                r.poke16(r.addr("FR_LEFT"), 0xFFFF)
+                r.call("fish_bg_rows")
+        page = r.page_bytes(PAGE1)
+        r.poke16(r.addr("FR_LEFT"), 0xFFFF)
+        cycles = r.call("fish_rect_rows", max_cycles=1000)
+        assert r.carry() and cycles < 40, (abandon, cycles)
+        assert r.page_bytes(PAGE1) == page, abandon
+
+
+def weeds_and_others(rnd, n_weeds):
+    """A scene: n_weeds Seaweeds (stacked near x 100) and a few others."""
+    specs = [(10, rnd.randrange(2), 0, 92 + rnd.randrange(16), 156) for _ in range(n_weeds)]
+    specs += [(rnd.choice((5, 11, 3)), rnd.randrange(2), rnd.randrange(2), 90 + rnd.randrange(30),
+               150 + rnd.randrange(10)) for _ in range(rnd.randrange(3))]
+    rnd.shuffle(specs)
+    return specs
+
+
+def test_background_job_resumes_at_any_row(r):
+    """Stopping and resuming on random budgets, at every row, builds the
+    same FISH_BG as one call; each call costs at most 16 cycles a unit; it
+    writes only FISH_BG, in the job's columns."""
+    rnd = random.Random(41)
+    for trial in range(40):
+        specs = weeds_and_others(rnd, rnd.randrange(4))
+        clear(r)
+        place(r, specs)
+        c0 = rnd.randrange(10, 16)
+        rect = (c0, c0 + rnd.randrange(1, 9), rnd.choice((140, 156, 160)), rnd.choice((170, 192)))
+        bg = fishref.fish_bg(r)
+        set_rect(r, rect)
+        r.call("fish_bg_begin")
+        a = r.addr("FISH_BG")
+        r.start_tracking()
+        calls, need = 0, 1
+        while True:
+            # small budgets, growing when one buys nothing (a call lists the
+            # Seaweed before its first row)
+            left = rnd.randrange(need, need + 300)
+            r.poke16(r.addr("FR_LEFT"), left)
+            row = r.peek(r.addr("FR_ROW"))
+            cycles = r.call("fish_bg_rows", max_cycles=400_000)
+            calls += 1
+            need = 1 if r.peek(r.addr("FR_ROW")) != row else need * 2
+            charged = left - r.peek16(r.addr("FR_LEFT"))
+            if left >= r.addr("FC_BGCALL"):
+                assert cycles <= 16 * charged, (specs, rect, left, cycles, charged)
+            else:
+                assert cycles <= 16 * r.addr("FC_BGCALL")
+            if r.carry():
+                break
+            assert calls < 2000
+        r.mem.track = False
+        for w in r.writes_outside((0, 0x0800), (0x0D9F, 0x10000)):
+            row, col = divmod(w - a, 40)
+            assert rect[0] <= col < rect[1] and row + 156 >= rect[2], hex(w)
+        assert not r.writes_outside((0, 0x2000), (0x4000, 0x10000)), "nothing on screen"
+        got, want = fishref.fish_bg(r), fishref.expected_bg(r)
+        for row in range(36):
+            for col in range(40):
+                i = row * 40 + col
+                inside = rect[0] <= col < rect[1] and row + 156 >= rect[2] and row + 156 < rect[3]
+                assert got[i] == (want[i] if inside else bg[i]), (specs, rect, row, col)
+
+
+def test_background_job_survives_creature_rects(r):
+    """Creature rects begun, drawn and finished between two fish_bg_rows calls
+    don't disturb the background job."""
+    rnd = random.Random(43)
+    for trial in range(6):
+        specs = weeds_and_others(rnd, 1 + rnd.randrange(3))
+        specs += [(rnd.choice((0, 2, 8)), rnd.randrange(2), rnd.randrange(2), 80 + rnd.randrange(40),
+                   120 + rnd.randrange(40)) for _ in range(2)]
+        clear(r)
+        place(r, specs)
+        weed = next(i for i, s_ in enumerate(specs) if s_[0] == 10)
+        rect = box(r, weed)[1]
+        set_rect(r, rect)
+        r.call("fish_bg_begin")
+        need, last = 30, None
+        while True:
+            r.poke16(r.addr("FR_LEFT"), rnd.randrange(need, need + 200))
+            r.call("fish_bg_rows", max_cycles=400_000)
+            if r.carry():
+                break
+            row = r.peek(r.addr("FR_ROW"))          # the job's next row
+            need = 30 if row != last else need * 2
+            last = row
+            for _ in range(rnd.randrange(3)):       # creature rects in between
+                i = rnd.randrange(len(specs))
+                vis, b = box(r, i)
+                if vis:
+                    assert redraw(r, (b[0], min(b[1], b[0] + 8), b[2], b[3]))[1]
+        got, want = fishref.fish_bg(r), fishref.expected_bg(r)
+        for row in range(rect[2] - 156, 36):
+            for col in range(rect[0], rect[1]):
+                assert got[row * 40 + col] == want[row * 40 + col], (specs, row, col)
+
+
+def drawn(s, specs, rect, charging):
+    """(cycles, units) to draw rect over the empty sea (FISH_BG rebuilt for
+    any Seaweed first). charging: the first call pays for the first row
+    alone, so the rest of the run pays row by row."""
+    def scene():
+        clear(s)
+        place(s, specs)
+        for i in range(len(specs)):
+            vis, b = box(s, i)
+            if vis and specs[i][0] == 10:
+                for c in range(b[0], b[1], 8):
+                    rebuild_bg(s, (c, min(c + 8, b[1]), b[2], b[3]))
+    first = 0xFFFF
+    if charging:                                # what a one-row rect charges
+        scene()
+        set_rect(s, (rect[0], rect[1], rect[2], rect[2] + 1))
+        s.call("fish_rect_begin")
+        s.poke16(s.addr("FR_LEFT"), 0xFFFF)
+        s.call("fish_rect_rows")
+        first = 0xFFFF - s.peek16(s.addr("FR_LEFT"))
+    scene()
+    set_rect(s, rect)
+    cycles = s.call("fish_rect_begin")
+    units = 0
+    for left in (first, 0xFFFF):
+        s.poke16(s.addr("FR_LEFT"), left)
+        cycles += s.call("fish_rect_rows", max_cycles=600_000)
+        units += left - s.peek16(s.addr("FR_LEFT"))
+        if s.carry():
+            break
+    assert s.carry()
+    return cycles, units
+
+
+def marginal(s, specs, rect, charging):
+    """The last row of rect: its cycles and units (rect less that row)."""
+    c1, u1 = drawn(s, specs, rect, charging)
+    c0, u0 = drawn(s, specs, rect[:3] + (rect[3] - 1,), charging)
+    return c1 - c0, u1 - u0
+
+
+def test_each_row_costs_no_more_than_it_charges(r):
+    """cost(N + 1 rows) - cost(N rows) <= 16 x what the extra row charges, for
+    every way a row is drawn (the per-call test hides small per-row
+    under-charges behind the fixed costs' slack)."""
+    worst = {}
+
+    def check_row(label, specs, rect, charging):
+        cyc, units = marginal(r, specs, rect, charging)
+        assert cyc <= 16 * units, (label, specs, rect, charging, cyc, units)
+        worst[label] = max(worst.get(label, (0, 0)), (cyc, units))
+
+    def eight(b):
+        c0 = max(0, min(b[1], 40) - 8)
+        return c0, c0 + 8
+
+    for kind in (0, 2, 5, 8, 11, 13):
+        k = kind_of(kind)
+        for d in (0, 1):
+            for x in range(40, 47):
+                for where, y in (("sea", 40), ("floor", 192 - k["ch"] - 1)):
+                    spec = [(kind, 0, d, x, y)]
+                    clear(r)
+                    place(r, spec)
+                    b = box(r, 0)[1]
+                    top = max(b[2], 156) if where == "floor" else b[2]
+                    rect = eight(b) + (top, top + 6)
+                    side = "left" if d and k["role"] < ROLE_STILL else "right"
+                    for charging in (False, True):
+                        check_row(f"{where} {side}", spec, rect, charging)
+                if kind in (0, 2, 8):                      # the switch to the floor
+                    spec = [(kind, 0, d, x, 140)]
+                    clear(r)
+                    place(r, spec)
+                    rect = eight(box(r, 0)[1]) + (150, 157)
+                    for charging in (False, True):
+                        check_row("switch", spec, rect, charging)
+    for rect in ((0, 8, 100, 110), (32, 40, 160, 170), (10, 18, 150, 157), (20, 21, 30, 40)):
+        for charging in (False, True):
+            check_row("empty", [], rect, charging)
+    rnd = random.Random(47)
+    for n in (2, 3, 4, 5):
+        for trial in range(12):
+            floor = trial % 3 != 2
+            left = trial % 2 == 0                          # every one facing left
+            specs = [(rnd.choice((0, 2, 4, 5, 8, 9)), rnd.randrange(2), 1 if left else rnd.randrange(2),
+                      98 + rnd.randrange(12), (150 if floor else 60) + rnd.randrange(6)) for _ in range(n)]
+            rect = (14, 22, 158 if floor else 68, 166 if floor else 76)
+            check_row(f"mix {n}", specs, rect, False)
+    print("\nworst marginal rows (cycles, units):",
+          ", ".join(f"{k} {v[0]}/{16 * v[1]}" for k, v in sorted(worst.items())))
+
+
+def test_each_background_row_costs_no_more_than_it_charges(r):
+    rnd = random.Random(53)
+    for n in range(4):
+        for trial in range(4):
+            specs = [(10, rnd.randrange(2), 0, 92 + rnd.randrange(16), 156) for _ in range(n)]
+            c0 = rnd.randrange(12, 16)
+            costs = []
+            for r1 in (180, 181):
+                clear(r)
+                place(r, specs)
+                set_rect(r, (c0, c0 + 8, 160, r1))
+                r.call("fish_bg_begin")
+                r.poke16(r.addr("FR_LEFT"), 0xFFFF)
+                cycles = r.call("fish_bg_rows", max_cycles=400_000)
+                assert r.carry()
+                costs.append((cycles, 0xFFFF - r.peek16(r.addr("FR_LEFT"))))
+            cyc, units = costs[1][0] - costs[0][0], costs[1][1] - costs[0][1]
+            assert cyc <= 16 * units, (specs, cyc, units)

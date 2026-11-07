@@ -15,7 +15,7 @@
 .include "config.inc"
 
 .export start, restart, begin_effect, step_once, pick_next, normalize_display
-.export fx_table, fx_count, fx_stash, fx2_stash, lc_install, load_fx, aux_fetch
+.export fx_table, fx_count, fx_stash, fx2_stash, lc_install, load_fx, aux_fetch, aux_copy
 
 .import timing_init, wait_ticks, timing_sync, rng_seed, rng_below, key_pressed
 .import clear_page, copy_page, show_page1, wipe_to_black, plot
@@ -241,8 +241,8 @@ fx_stash:
         sta WRMAINRAM
         rts
 
-; lc_install: put aux_fetch into language-card RAM. setup calls it once the
-; card's RAM is switched in.
+; lc_install: put aux_fetch and aux_copy into language-card RAM. setup calls
+; it once the card's RAM is switched in.
 lc_install:
         ldx #<__LCCODE_SIZE__
 :       lda __LCCODE_LOAD__-1,x
@@ -318,5 +318,16 @@ aux_fetch:
         inc LDST+1
         dex
         bne @copy
+        sta RDMAINRAM
+        rts
+
+; aux_copy: copy Y + 1 bytes (Y = 0-127) from aux memory at LSRC to main
+; memory at LDST, last first: a row of Fish!'s floor, which stays in aux.
+aux_copy:
+        sta RDCARDRAM
+@copy:  lda (LSRC),y
+        sta (LDST),y
+        dey
+        bpl @copy
         sta RDMAINRAM
         rts

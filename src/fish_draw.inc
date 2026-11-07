@@ -30,6 +30,12 @@
 ; row buffer W, the first over the background and the last to the screen.
 ; A run's first row pays first for finding who is in it, then for setting
 ; the run up and any patching.
+;
+; FISH_BG is rebuilt by the background job (fish_bg_begin, fish_bg_rows),
+; budgeted the same way: each row the floor's bytes, read from aux (the floor
+; stays in FX2), then every Seaweed in slot order through the same blocks and
+; stage 2. Code the renderer patches as it runs lives in RAM the effect owns
+; (FISHCODE, FISHCODE2, block B), never in the overlay.
 
 ; ---- macros ----
 .macro SETGO go, endl, wl       ; go's jump: endl - wl
@@ -207,7 +213,14 @@ k_w7      = FISH_RD + 173       ; 14 each, per kind, made at init: 7 * wb,
 k_xm      = k_w7 + FISH_NKIND   ;   cw - bx - 7wb (X facing left, from x),
 k_pad     = k_xm + FISH_NKIND   ;   7wb - bw (the padding),
 k_rwb     = k_pad + FISH_NKIND  ;   rows * wb (mask from lit)
-FISH_RD_END = k_rwb + FISH_NKIND
+rd_pend   = k_rwb + FISH_NKIND  ; 1 while a creature rect is pending
+bj_c0     = rd_pend + 1         ; the background job: its columns,
+bj_c1     = rd_pend + 2
+bj_row    = rd_pend + 3         ;   its next row and the row after its last,
+bj_r1     = rd_pend + 4
+bj_pend   = rd_pend + 5         ;   1 until it is finished
+bj_scan   = rd_pend + 6         ;   what looking at a row costs (this call)
+FISH_RD_END = rd_pend + 7
 .assert FISH_RD_END <= FISH_STATE + $140, error, "renderer RAM runs past FISH_STATE + $140"
 
 FISH_MAX   = 10
@@ -223,35 +236,49 @@ STEP1      = blka_m4 - blka_m5  ; bytes in a step
 ; none reaching the floor: FC_SWITCH more for its first row on it). A row of
 ; n >= 2 costs FC_MIX + n * FC_MIXPER, and n >= 3 another n * FC_MIXNP.
 ; Measured worst cases (cycles): a call that has to stop, about 155 (ten
-; listed); finding who is in a run 221 + 135 per creature; setting it up
-; 622; a patch 654; the switch 452; rows: empty 182, sea 238 / 270 facing
-; left, floor 429 / 472, two 1,266, three 4,115, four 5,453, five 6,747 (all
-; at 8 bytes wide).
+; listed); finding who is in a run 234 + ~145 per creature; setting it up
+; 622; a patch 654; the switch 452; rows: empty 182, sea 254 / 286 facing
+; left, floor 429 / 472; mixes, every creature facing left over the floor:
+; two 1,318, three 3,512 (4,115 for a run's first row, patching all three),
+; four 5,516, five 6,856 (all at 8 bytes wide).
 FC_CALL   = 10                  ; fish_rect_rows itself, and finding it must stop
-FC_EVENT  = 14                  ; a run's first row: finding who is in it
+FC_EVENT  = 15                  ; a run's first row: finding who is in it
 FC_EVPER  = 9                   ;   per creature touching the rectangle
 FC_SETUP  = 40                  ;   setting the run up
 FC_PATCH  = 42                  ;   per block patched
 FC_SWITCH = 29                  ; a run of one or none reaching the floor
 FC_EMPTY  = 12                  ; a row with no creature
-FC_SEA_N  = 16                  ; one creature over black, facing right
-FC_SEA_M  = 18                  ;   facing left
+FC_SEA_N  = 17                  ; one creature over black, facing right
+FC_SEA_M  = 19                  ;   facing left
 FC_FLR_N  = 28                  ; one creature over the floor, facing right
 FC_FLR_M  = 31                  ;   facing left
 FC_MIX    = 8                   ; two or more creatures: the row
-FC_MIXPER = 37                  ;   per creature
+FC_MIXPER = 38                  ;   per creature
 FC_MIXNP  = 47                  ;   per creature, three or more (each patched)
 ; fish_rect_begin: FC_BEGIN, then per slot in use FC_BEGPER, or FC_BEGFAR
 ; for one whose rows miss the rectangle (measured: 149; 562; 143).
 FC_BEGIN  = 10
 FC_BEGPER = 36
 FC_BEGFAR = 10
-; fish_bg_rect (not budgeted): FC_BGROW per floor row of the rectangle, and
-; per Seaweed touching it FC_BGWEED plus FC_BGWROW per row of it (measured,
-; 8 bytes by 36 rows: floor alone 6,690; one Seaweed 24,246; three 59,330).
-FC_BGROW  = 12
-FC_BGWEED = 72
-FC_BGWROW = 29
+; The background job: fish_bg_begin costs FC_BGBEGIN (not charged: like
+; fish_rect_begin, for Task 5's estimates). fish_bg_rows charges FC_BGCALL a
+; call, FC_BGSETUP, then to list the Seaweed FC_BGANY per slot that isn't one
+; and FC_BGSLOT per Seaweed slot, each as it looks at it; FC_BGSCAN +
+; FC_BGSCANPER per Seaweed listed to look at a row, the first now and each
+; next with the row before; and each row FC_BGROW, FC_BGWROW per Seaweed
+; listed and FC_PATCH per block it patches.
+; Measured worst cases (cycles, 8 bytes wide): a call that stops before its
+; first row 580, + 73 per other slot, + 746 per Seaweed slot; a row 444,
+; + 709 per Seaweed, + a patch (654) per block patched.
+FC_BGBEGIN = 4
+FC_BGCALL  = 11
+FC_BGSETUP = 20
+FC_BGANY   = 5
+FC_BGSLOT  = 41
+FC_BGROW   = 29
+FC_BGWROW  = 45
+FC_BGSCAN  = 6
+FC_BGSCANPER = 7
 
 ; ================================================================ entry points
 
@@ -271,8 +298,12 @@ fish_box:
 :       rts
 
 ; fish_rect_begin: lists the creatures (not Seaweed) touching the rectangle
-; in FR_C0..FR_R1, in slot order, and sets FR_ROW = FR_R0.
+; in FR_C0..FR_R1, in slot order, and sets FR_ROW = FR_R0. The rect is then
+; pending until fish_rect_rows finishes it, or something abandons it: another
+; fish_rect_begin, or fish_bg_begin / fish_bg_rows.
 fish_rect_begin:
+        lda #1
+        sta rd_pend
         jsr vbl_poll
         jsr rect_setup
         stz rd_nlist
@@ -295,9 +326,15 @@ fish_rect_begin:
 
 ; fish_rect_rows: draws rows from FR_ROW, charging each against FR_LEFT and
 ; stopping before one that doesn't fit: carry clear. Carry set when the
-; rectangle is finished.
+; rectangle is finished, and at once, drawing nothing, if it isn't pending
+; (finished already, or abandoned). The call itself costs FC_CALL: with less
+; than that in FR_LEFT, it zeroes FR_LEFT and draws nothing.
 fish_rect_rows:
-        lda FR_LEFT             ; the call itself
+        lda rd_pend
+        bne :+
+        sec
+        rts
+:       lda FR_LEFT             ; the call itself
         sec
         sbc #FC_CALL
         sta FR_LEFT
@@ -367,6 +404,7 @@ rr_stop:
         clc
         rts
 rr_done:
+        stz rd_pend             ; finished
         sec
 just_rts:
         rts
@@ -385,54 +423,6 @@ charge:
         sty FR_LEFT
 :       rts
 
-; ---- the ring: a run of rows with one creature or none ----
-; The tails: stage 2 done with a row, the next if it's in the run. A run
-; paid for in full when it began takes tail_flr_p or tail_sea_p; otherwise
-; tail_flr or tail_sea pay for each row and stop when the budget runs out.
-tail_flr:
-        ADD40C RD_PS            ; FISH_BG's next row (carry is clear)
-tail_sea:
-        inc FR_ROW
-        ldx FR_ROW
-        cpx RD_NEXT
-        beq tail_run
-        lda FR_LEFT
-        sec
-        sbc RD_COST             ; under 256
-        bcs :+
-        ldy FR_LEFT+1
-        beq tail_stop
-        dec FR_LEFT+1
-:       sta FR_LEFT
-        bra ring_x
-tail_flr_p:
-        ADD40C RD_PS
-tail_sea_p:
-        inc FR_ROW
-        ldx FR_ROW
-        cpx RD_NEXT
-        beq tail_run
-; ring_x: a row, paid for, X = FR_ROW. The screen row, then block A (or
-; empty_go), stage 2, and a tail.
-ring_x: lda row_lo,x
-        sta RD_PD
-        lda row_hi,x
-        sta RD_PD+1
-        ldy RD_YA
-        lda #0
-ring_j: jmp 0                   ; -> block A's entry, or empty_go
-empty_go:
-        ldy RD_LAST
-        clc                     ; for tail_flr (a block leaves it clear)
-empty_j:
-        jmp 0                   ; -> stage 2
-ring_start:                     ; the run's first row
-        ldx FR_ROW
-        bra ring_x
-tail_run:
-        jmp rr_row
-tail_stop:
-        jmp rr_stop
 
 ; floor_switch: a run of one creature or none goes on over the floor: the
 ; same creature, the floor's costs, stage 2 and FISH_BG's first row.
@@ -513,94 +503,6 @@ batch:
         rts
 
 tails:  .word tail_sea, tail_flr, tail_sea_p, tail_flr_p
-
-; fish_bg_rect: rebuilds FISH_BG in the rectangle's columns, in its rows
-; 156-191 only: the floor, then every Seaweed in slot order.
-fish_bg_rect:
-        jsr vbl_poll
-        lda FR_R0
-        cmp #FLOOR_TOP
-        bcs :+
-        lda #FLOOR_TOP
-:       sta rd_top
-        cmp FR_R1
-        bcc :+
-        rts
-:       jsr rect_setup
-        jsr calls               ; stage 1 and 2 return to their callers
-        lda rd_top              ; the floor
-        jsr bgrow
-        ldx rd_top
-        lda FR_R1
-        ldy #>(FISH_FLOOR - FISH_BG)
-        jsr bg_rows
-        ldx #0                  ; then each Seaweed
-@slot:  cpx fish_n
-        bcs @done
-        ldy fish_kind,x
-        lda fk_role,y
-        cmp #ROLE_STILL
-        bne @next
-        stz rd_nlist
-        jsr try_list
-        lda rd_nlist
-        beq @next
-        phx
-        jsr vbl_poll
-        jsr empty_a
-        ldx #<BOFF              ; block A, list entry 0
-        ldy #0
-        jsr patch
-        ldy #0
-        lda l_top
-        jsr yoff
-        sta RD_YA
-        lda l_top
-        jsr bgrow
-        ldx l_top
-        lda l_bot
-        ldy #0
-        jsr bg_rows
-        plx
-@next:  inx
-        bra @slot
-@done:  lda #$FF                ; the list was this routine's
-        sta rd_hold
-        sta rd_hold+1
-        stz rd_nlist
-        rts
-
-; bg_rows: FISH_BG rows X..A-1 from the row in RD_T on. Y > 0: copied from
-; Y pages on (FISH_FLOOR). Y = 0: BG AND NOT mask OR lit, through block A.
-bg_rows:
-        sta RD_T+3
-        sty RD_T+2
-        lda RD_T
-        sta RD_PD
-        sta RD_PS
-        lda RD_T+1
-        sta RD_PD+1
-        clc
-        adc RD_T+2
-        sta RD_PS+1
-@row:   phx
-        ldy RD_LAST
-        lda RD_T+2
-        beq @weed
-        jsr go_copy
-        bra @on
-@weed:  ldy RD_YA
-        jsr call_a              ; A = 0
-        jsr go_p1a
-@on:    ADD40 RD_PD
-        ADD40 RD_PS
-        plx
-        inx
-        cpx RD_T+3
-        bcc @row
-        rts
-
-call_a: jmp (rd_entm)
 
 ; ================================================================ placement
 
@@ -894,8 +796,8 @@ times_wb:
         adc RD_T+6
 @done:  rts
 
-; calls: blocks and stage 2 return to their callers (for h_mix and
-; fish_bg_rect).
+; calls: blocks and stage 2 return to their callers (for h_mix and the
+; background job).
 calls:
         SETGO go_p1a, s2_p1a_end, rd_wm+2
         SETGO go_flrm, s2_flrm_end, rd_wm+3
@@ -909,16 +811,16 @@ calls:
 
 ; ================================================================ runs of rows
 
-; rr_event: X = FR_ROW. Finds the creatures in this row and the next row
-; where that changes, and sets the run's costs.
-rr_event:
+; scan_row: X = a row. rd_act/rd_nact: the list entries in it, in slot
+; order; RD_NEXT: the next row where that changes, by FR_R1.
+scan_row:
         stx RD_T+7
-        lda FR_R1               ; the run ends by FR_R1
+        lda FR_R1
         sta RD_NEXT
         stz rd_nact
         ldy #0
 @scan:  cpy rd_nlist
-        bcs @scanned
+        bcs @done
         lda RD_T+7
         cmp l_top,y
         bcc @before
@@ -937,7 +839,12 @@ rr_event:
         sta RD_NEXT
 @after: iny
         bra @scan
-@scanned:
+@done:  rts
+
+; rr_event: X = FR_ROW. Finds the creatures in this row and the next row
+; where that changes, and sets the run's costs.
+rr_event:
+        jsr scan_row
         lda RD_NEXT             ; and at the floor's top
         sta rd_next2
         ldx RD_T+7
@@ -1145,6 +1052,199 @@ hold:
 
 blk_off:  .byte <BOFF, 0       ; blocks A and B, from block B
 
+; empty_a: nothing in the buffers, so stage 2 copies the background.
+empty_a:
+.repeat 16, I
+        stz LA+I
+.endrepeat
+        rts
+
+; ================================================================ stage 1
+; Block A is the first thing in FISHCODE; block B is a copy of it made at
+; init (fish_draw_init) at FISH_BLKB, BOFF bytes before it, so one patch
+; routine reaches either with X = BOFF or 0. They differ only in whose place
+; they move on (RD_YA, RD_YB). Both write LA and MA.
+OM5     = blka_m5 - blka        ; a step's offset in its block
+OM1     = blka_m1 - blka
+OM0     = blka_m0 - blka
+OL0     = blka_l0 - blka
+BLKLEN  = blka_end + 3 - blka
+blkb_end = FISH_BLKB + (blka_end - blka)
+.assert OM5 = 0, error, "a block starts with step 5"
+.assert STEP1 = 11, error, "a step is 11 bytes"
+.assert OL0 + 13 = blka_end - blka, error, "blka_l0's layout"
+.assert BOFF < 256 && BLKLEN <= BOFF, error, "block B doesn't fit before block A"
+.assert MA = LA + 8, error, "MA follows LA"
+
+
+; ================================================================ stage 2
+; In page 2 (FISHCODE, copied there by fish_init). Each is unrolled for 8
+; columns, right to left: column j of the rectangle uses buffer byte j and
+; Y = FR_C0 + j. go_X jumps in at the rectangle's width (rect_setup); each
+; ends with a patched jump.
+.segment "FISHCODE"
+
+blka:   STAGE1 "blka_", RD_YA
+
+s2_sean:                        ; screen = LA
+.repeat 8, I
+        lda LA+7-I
+        sta (RD_PD),y
+        dey
+.endrepeat
+        S2END "s2_sean"
+
+s2_seam:                        ; screen = REV(LA)
+.repeat 8, I
+        ldx LA+7-I
+        lda FISH_REV,x
+        sta (RD_PD),y
+        dey
+.endrepeat
+        S2END "s2_seam"
+
+go_flrm: jmp s2_flrm            ; (RD_PD) = (RD_PS) AND NOT REV(MA) OR REV(LA)
+s2_flrm:
+.repeat 8, I
+        ldx MA+7-I
+        lda FISH_IREV,x
+        and (RD_PS),y
+        ldx LA+7-I
+        ora FISH_REV,x
+        sta (RD_PD),y
+        dey
+.endrepeat
+        S2END "s2_flrm"
+
+go_p1a: jmp s2_p1a              ; (RD_PD) = (RD_PS) AND NOT MA OR LA
+s2_p1a:
+.repeat 8, I
+        lda (RD_PS),y
+        ora MA+7-I
+        eor MA+7-I
+        ora LA+7-I
+        sta (RD_PD),y
+        dey
+.endrepeat
+        S2END "s2_p1a"
+
+zero8:  .res 8, 0               ; a row of nothing, for mixes over black
+
+.assert s2_sean_end - s2_sean = 8 * 5, error, "s2_sean steps"
+.assert s2_seam_end - s2_seam = 8 * 8, error, "s2_seam steps"
+.assert s2_flrm_end - s2_flrm = 8 * 15, error, "s2_flrm steps"
+.assert s2_p1a_end - s2_p1a = 8 * 11, error, "s2_p1a steps"
+
+.segment "FX14"
+
+; ================================================================ FISHCODE2
+; Copied to FISH_CODE2 by fish_init (FXRAM): the code it patches as it goes
+; (the ring, s2_copy), and the colder code. Code in the overlay is never
+; written.
+.segment "FISHCODE2"
+
+; ---- the ring: a run of rows with one creature or none ----
+; The tails: stage 2 done with a row, the next if it's in the run. A run
+; paid for in full when it began takes tail_flr_p or tail_sea_p; otherwise
+; tail_flr or tail_sea pay for each row and stop when the budget runs out.
+tail_flr:
+        ADD40C RD_PS            ; FISH_BG's next row (carry is clear)
+tail_sea:
+        inc FR_ROW
+        ldx FR_ROW
+        cpx RD_NEXT
+        beq tail_run
+        lda FR_LEFT
+        sec
+        sbc RD_COST             ; under 256
+        bcs :+
+        ldy FR_LEFT+1
+        beq tail_stop
+        dec FR_LEFT+1
+:       sta FR_LEFT
+        bra ring_x
+tail_flr_p:
+        ADD40C RD_PS
+tail_sea_p:
+        inc FR_ROW
+        ldx FR_ROW
+        cpx RD_NEXT
+        beq tail_run
+; ring_x: a row, paid for, X = FR_ROW. The screen row, then block A (or
+; empty_go), stage 2, and a tail.
+ring_x: lda row_lo,x
+        sta RD_PD
+        lda row_hi,x
+        sta RD_PD+1
+        ldy RD_YA
+        lda #0
+ring_j: jmp 0                   ; -> block A's entry, or empty_go
+empty_go:
+        ldy RD_LAST
+        clc                     ; for tail_flr (a block leaves it clear)
+empty_j:
+        jmp 0                   ; -> stage 2
+ring_start:                     ; the run's first row
+        ldx FR_ROW
+        bra ring_x
+tail_run:
+        jmp rr_row
+tail_stop:
+        jmp rr_stop
+
+go_copy: jmp s2_copy            ; (RD_PD) = (RD_PS): FISH_BG to the screen
+s2_copy:
+.repeat 8
+        lda (RD_PS),y
+        sta (RD_PD),y
+        dey
+.endrepeat
+        S2END "s2_copy"
+.assert s2_copy_end - s2_copy = 8 * 5, error, "s2_copy steps"
+
+
+; fish_draw_init: each kind's k_w7, k_xm, k_pad, k_rwb, and block B, a copy
+; of block A moving on RD_YB.
+fish_draw_init:
+        ldy #FISH_NKIND-1
+@kind:  lda fk_wb,y
+        tax
+        asl a
+        asl a
+        asl a
+        sec
+        sbc fk_wb,y
+        sta k_w7,y
+        sec
+        sbc fk_bw,y
+        sta k_pad,y
+        lda fk_cw,y
+        sec
+        sbc fk_bx,y
+        sec
+        sbc k_w7,y
+        sta k_xm,y
+        lda fk_rows,y
+        jsr times_wb
+        sta k_rwb,y
+        dey
+        bpl @kind
+        ldx #0
+:       lda blka,x
+        sta FISH_BLKB,x
+        inx
+        cpx #BLKLEN
+        bne :-
+        lda #RD_YB
+        sta FISH_BLKB + OL0 + 10
+        lda #<empty_go
+        sta rd_empty
+        lda #>empty_go
+        sta rd_empty+1
+        stz rd_pend             ; no creature rect, no background job
+        stz bj_pend
+        rts
+
 ; h_mix: a row with two or more creatures. Creature i of the run goes
 ; through block i AND 1 onto W, from the background (the first) or W, and
 ; the last from W to the screen.
@@ -1205,13 +1305,6 @@ h_mix:
 @next:  inc FR_ROW
         jmp rr_row
 @mask:  jmp (rd_entm,x)
-
-; empty_a: nothing in the buffers, so stage 2 copies the background.
-empty_a:
-.repeat 16, I
-        stz LA+I
-.endrepeat
-        rts
 
 ; ================================================================ patching
 
@@ -1332,129 +1425,228 @@ entry_off:
         .byte OM5 + (4 - I) * STEP1 + 3
 .endrepeat
 
-; ================================================================ stage 1
-; Block A is the first thing in FISHCODE; block B is a copy of it made at
-; init (fish_draw_init) at FISH_BLKB, BOFF bytes before it, so one patch
-; routine reaches either with X = BOFF or 0. They differ only in whose place
-; they move on (RD_YA, RD_YB). Both write LA and MA.
-OM5     = blka_m5 - blka        ; a step's offset in its block
-OM1     = blka_m1 - blka
-OM0     = blka_m0 - blka
-OL0     = blka_l0 - blka
-BLKLEN  = blka_end + 3 - blka
-blkb_end = FISH_BLKB + (blka_end - blka)
-.assert OM5 = 0, error, "a block starts with step 5"
-.assert STEP1 = 11, error, "a step is 11 bytes"
-.assert OL0 + 13 = blka_end - blka, error, "blka_l0's layout"
-.assert BOFF < 256 && BLKLEN <= BOFF, error, "block B doesn't fit before block A"
-.assert MA = LA + 8, error, "MA follows LA"
+; ================================================================ background job
+; (FISHCODE2, in FXRAM: copied there by fish_init before anything uses it.)
 
-; fish_draw_init: each kind's k_w7, k_xm, k_pad, k_rwb, and block B, a copy
-; of block A moving on RD_YB.
-fish_draw_init:
-        ldy #FISH_NKIND-1
-@kind:  lda fk_wb,y
-        tax
-        asl a
-        asl a
-        asl a
-        sec
-        sbc fk_wb,y
-        sta k_w7,y
-        sec
-        sbc fk_bw,y
-        sta k_pad,y
-        lda fk_cw,y
-        sec
-        sbc fk_bx,y
-        sec
-        sbc k_w7,y
-        sta k_xm,y
-        lda fk_rows,y
-        jsr times_wb
-        sta k_rwb,y
-        dey
-        bpl @kind
-        ldx #0
-:       lda blka,x
-        sta FISH_BLKB,x
-        inx
-        cpx #BLKLEN
-        bne :-
-        lda #RD_YB
-        sta FISH_BLKB + OL0 + 10
-        lda #<empty_go
-        sta rd_empty
-        lda #>empty_go
-        sta rd_empty+1
+; fish_bg_begin: sets up a job to rebuild FISH_BG in the rectangle in
+; FR_C0..FR_R1 (at most 8 bytes wide, as fish_box gives them; rows clipped to
+; 156-191): each row the floor's bytes, then every Seaweed in slot order.
+; fish_bg_rows does the work. It abandons a pending creature rect (Task 5
+; never starts a job while one is pending).
+fish_bg_begin:
+        stz rd_pend
+        lda FR_C0
+        sta bj_c0
+        lda FR_C1
+        sta bj_c1
+        lda FR_R1
+        sta bj_r1
+        lda FR_R0
+        cmp #FLOOR_TOP
+        bcs :+
+        lda #FLOOR_TOP
+:       sta bj_row
+        lda #1
+        sta bj_pend
         rts
 
-go_copy: jmp s2_copy            ; (RD_PD) = (RD_PS): FISH_FLOOR to FISH_BG,
-s2_copy:                        ; and FISH_BG to the screen
-.repeat 8
-        lda (RD_PS),y
-        sta (RD_PD),y
+; fish_bg_rows: rebuilds the job's rows of FISH_BG from where it stopped,
+; charging each against FR_LEFT before doing it, with the same units and
+; rule as fish_rect_rows: carry set when the job is finished (or there is
+; none), carry clear when it stopped before a row that didn't fit. FR_LEFT =
+; $FFFF finishes it. The job's state is its own: creature rects may begin,
+; run and finish between calls, and each call lists the Seaweed and patches
+; its blocks again. A call abandons a pending creature rect (Task 5 never
+; calls it while one is pending) and leaves FR_C0..FR_ROW its own.
+fish_bg_rows:
+        stz rd_pend
+        lda bj_pend
+        bne :+
+        sec
+        rts
+:       jsr vbl_poll            ; once a call, and once a row
+        lda FR_LEFT             ; the call itself
+        sec
+        sbc #FC_BGCALL
+        sta FR_LEFT
+        bcs @list
+        lda FR_LEFT+1
+        beq :+
+        dec FR_LEFT+1
+        bra @list
+:       stz FR_LEFT
+@list:  lda #FC_BGSETUP         ; then setting up
+        jsr charge_a
+        bcs :+
+        jmp @stop
+:       lda bj_c0               ; the job's rectangle, from its next row
+        sta FR_C0
+        lda bj_c1
+        sta FR_C1
+        lda bj_row
+        sta FR_R0
+        sta rd_top
+        lda bj_r1
+        sta FR_R1
+        jsr rect_setup
+        jsr calls
+        stz rd_nlist
+        ldx #0                  ; and listing the Seaweed, each slot paid for
+@slot:  cpx fish_n              ; as it is looked at
+        bcs @scan
+        ldy fish_kind,x
+        lda fk_role,y
+        cmp #ROLE_STILL
+        beq :+
+        lda #FC_BGANY
+        jsr charge_a
+        bcc @stop2
+        bra @nx
+:       lda #FC_BGSLOT
+        jsr charge_a
+        bcc @stop2
+        jsr try_list
+@nx:    inx
+        bra @slot
+@stop2: clc
+        rts
+@scan:  lda #FC_BGSCAN          ; looking at the first row, paid for now; each
+        ldx rd_nlist            ; row pays for looking at the next
+        beq :++
+        clc
+:       adc #FC_BGSCANPER
+        dex
+        bne :-
+:       sta bj_scan
+        jsr charge_a
+        bcc @stop2
+@row:   ldx bj_row
+        cpx bj_r1
+        bcc :+
+        stz bj_pend             ; finished
+        sec
+        rts
+:       stx FR_ROW
+        jsr scan_row
+        lda #FC_BGROW           ; this row: FC_BGROW, FC_BGWROW per Seaweed,
+        sta RD_T                ; FC_PATCH per block it must patch, and
+        stz RD_T+1              ; looking at the next
+        lda bj_scan
+        jsr add_t
+        ldx rd_nlist
+        beq @pat
+:       lda #FC_BGWROW
+        jsr add_t
+        dex
+        bne :-
+@pat:   lda rd_hold             ; Seaweed i through block i AND 1
+        sta RD_T+2
+        lda rd_hold+1
+        sta RD_T+3
+        ldx #0
+@pp:    cpx rd_nact
+        bcs @paid
+        txa
+        and #1
+        tay
+        lda rd_act,x
+        cmp RD_T+2,y
+        beq :+
+        sta RD_T+2,y
+        lda #FC_PATCH
+        jsr add_t
+:       inx
+        bra @pp
+@paid:  jsr charge
+        bcc @stop
+        jsr vbl_poll
+        lda bj_row              ; the floor's bytes, from aux
+        jsr bgrow
+        lda RD_T
+        sta RD_PS
+        sta RD_PD
+        clc
+        adc FR_C0
+        sta LDST
+        lda RD_T+1
+        sta RD_PS+1
+        sta RD_PD+1
+        adc #0
+        sta LDST+1
+        lda LDST
+        clc
+        adc #<(__FISHFLOOR_LOAD__ - FISH_BG)
+        sta LSRC
+        lda LDST+1
+        adc #>(__FISHFLOOR_LOAD__ - FISH_BG)
+        sta LSRC+1
+        ldy RD_WID
         dey
-.endrepeat
-        S2END "s2_copy"
-.assert s2_copy_end - s2_copy = 8 * 5, error, "s2_copy steps"
+        jsr aux_copy
+        stz rd_i                ; then each Seaweed in the row, in slot order
+@weed:  ldy rd_i
+        cpy rd_nact
+        bcs @next
+        tya
+        and #1
+        tax
+        lda rd_act,y
+        tay
+        jsr hold
+        jsr empty_a
+        lda rd_i
+        and #1
+        tax
+        ldy RD_YA,x
+        txa
+        asl a
+        tax
+        lda #0
+        jsr @mask
+        ldy RD_LAST
+        jsr go_p1a              ; BG = BG AND NOT mask OR lit
+        inc rd_i
+        bra @weed
+@next:  inc bj_row
+        jmp @row
+@stop:  clc
+        rts
+@mask:  jmp (rd_entm,x)
 
-; ================================================================ stage 2
-; In page 2 (FISHCODE, copied there by fish_init). Each is unrolled for 8
-; columns, right to left: column j of the rectangle uses buffer byte j and
-; Y = FR_C0 + j. go_X jumps in at the rectangle's width (rect_setup); each
-; ends with a patched jump.
-.segment "FISHCODE"
+; fish_bg_floor: all of FISH_BG rebuilt by the background job, 8 bytes at a
+; time, with no budget (init, and after a change to the Seaweed set).
+fish_bg_floor:
+        lda #0
+@strip: sta FR_C0
+        clc
+        adc #8
+        sta FR_C1
+        lda #FLOOR_TOP
+        sta FR_R0
+        lda #192
+        sta FR_R1
+        jsr fish_bg_begin
+        lda #$FF
+        sta FR_LEFT
+        sta FR_LEFT+1
+        jsr fish_bg_rows
+        lda FR_C1
+        cmp #40
+        bcc @strip
+        rts
 
-blka:   STAGE1 "blka_", RD_YA
+; charge_a: charge (below) A units. Keeps X.
+charge_a:
+        sta RD_T
+        stz RD_T+1
+        jmp charge
 
-s2_sean:                        ; screen = LA
-.repeat 8, I
-        lda LA+7-I
-        sta (RD_PD),y
-        dey
-.endrepeat
-        S2END "s2_sean"
-
-s2_seam:                        ; screen = REV(LA)
-.repeat 8, I
-        ldx LA+7-I
-        lda FISH_REV,x
-        sta (RD_PD),y
-        dey
-.endrepeat
-        S2END "s2_seam"
-
-go_flrm: jmp s2_flrm            ; (RD_PD) = (RD_PS) AND NOT REV(MA) OR REV(LA)
-s2_flrm:
-.repeat 8, I
-        ldx MA+7-I
-        lda FISH_IREV,x
-        and (RD_PS),y
-        ldx LA+7-I
-        ora FISH_REV,x
-        sta (RD_PD),y
-        dey
-.endrepeat
-        S2END "s2_flrm"
-
-go_p1a: jmp s2_p1a              ; (RD_PD) = (RD_PS) AND NOT MA OR LA
-s2_p1a:
-.repeat 8, I
-        lda (RD_PS),y
-        ora MA+7-I
-        eor MA+7-I
-        ora LA+7-I
-        sta (RD_PD),y
-        dey
-.endrepeat
-        S2END "s2_p1a"
-
-zero8:  .res 8, 0               ; a row of nothing, for mixes over black
-
-.assert s2_sean_end - s2_sean = 8 * 5, error, "s2_sean steps"
-.assert s2_seam_end - s2_seam = 8 * 8, error, "s2_seam steps"
-.assert s2_flrm_end - s2_flrm = 8 * 15, error, "s2_flrm steps"
-.assert s2_p1a_end - s2_p1a = 8 * 11, error, "s2_p1a steps"
+; add_t: RD_T (2 bytes) += A.
+add_t:  clc
+        adc RD_T
+        sta RD_T
+        bcc :+
+        inc RD_T+1
+:       rts
 
 .segment "FX14"
