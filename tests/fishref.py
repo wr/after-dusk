@@ -1,0 +1,124 @@
+"""What Fish!'s screen must hold, worked out in Python from the memory and data
+contract, for the creatures in the simulator's state arrays.
+
+    art = load_art()                    # build/fish_art.json
+    assert s.page_bytes() == expected_page(s)
+    assert fish_bg(s) == expected_bg(s)
+
+A creature is drawn from its frame (lit rows, then mask rows, facing right).
+Facing left (swimmers only: Seaweed and Bubbles never turn), each source row is
+read right to left through the bit-reverse table and drawn at
+X = x + cw - bx - wb*7; facing right at X = x + bx. Byte column c0 = X // 7,
+shift k = X % 7, and output byte i = (src[i] << k) & $7F | src[i-1] >> (7-k).
+
+Every row starts from FISH_BG (rows 156-191) or black, then every slot that
+isn't Seaweed, in slot order: screen = (screen AND NOT mask) OR lit. FISH_BG is
+the floor with every Seaweed composed onto it the same way, in slot order.
+"""
+import json
+from functools import lru_cache
+
+from conftest import BUILD
+from sim import PAGE1, row_base
+
+FLOOR_TOP = 156
+FLOOR_ROWS = 192 - FLOOR_TOP
+ROLE_STILL = 4                  # Seaweed
+REV = [int(f"{b:07b}"[::-1], 2) for b in range(128)]
+
+
+@lru_cache(maxsize=None)
+def load_art():
+    return json.loads((BUILD / "fish_art.json").read_text())
+
+
+def signed(v):
+    return v - 0x10000 if v & 0x8000 else v
+
+
+def creatures(s):
+    """The slots in use, in slot order, read from the state arrays."""
+    def arr(name, i):
+        return s.peek(s.addr(name) + i)
+
+    out = []
+    for i in range(s.peek(s.addr("fish_n"))):
+        out.append({
+            "kind": arr("fish_kind", i), "frame": arr("fish_frame", i), "dir": arr("fish_dir", i),
+            "x": signed(arr("fish_xl", i) | arr("fish_xh", i) << 8),
+            "y": signed(arr("fish_yl", i) | arr("fish_yh", i) << 8),
+        })
+    return out
+
+
+def mirrored(c):
+    return c["dir"] == 1 and load_art()["kinds"][c["kind"]]["role"] < ROLE_STILL
+
+
+def placed(c):
+    """(top row, first byte column, [(lit, mask) per row]); each row wb+1 bytes."""
+    kind = load_art()["kinds"][c["kind"]]
+    wb = kind["wb"]
+    frame = kind["frames"][c["frame"]]
+    if mirrored(c):
+        x = c["x"] + kind["cw"] - kind["bx"] - wb * 7
+    else:
+        x = c["x"] + kind["bx"]
+    c0, k = x // 7, x % 7
+
+    def shift(row):
+        src = [REV[b] for b in reversed(row)] if mirrored(c) else list(row)
+        src = [0] + src + [0]                   # src[-1] and src[wb]
+        return [(src[i + 1] << k) & 0x7F | src[i] >> (7 - k) for i in range(wb + 1)]
+
+    rows = [(shift(lit), shift(mask)) for lit, mask in zip(frame["lit"], frame["mask"])]
+    return c["y"] + kind["by"], c0, rows
+
+
+def compose(lines, c, first=0):
+    """Draw creature c over lines (a list of 40-byte bytearrays for rows
+    first, first+1, ...): line = (line AND NOT mask) OR lit."""
+    top, c0, rows = placed(c)
+    for r, (lit, mask) in enumerate(rows):
+        y = top + r - first
+        if not 0 <= y < len(lines):
+            continue
+        line = lines[y]
+        for i in range(len(lit)):
+            if 0 <= c0 + i < 40:
+                line[c0 + i] = line[c0 + i] & ~mask[i] & 0x7F | lit[i]
+
+
+def expected_bg(s):
+    """FISH_BG: the floor, then every Seaweed in slot order (1,440 bytes)."""
+    lines = [bytearray(row) for row in load_art()["floor"]]
+    for c in creatures(s):
+        if load_art()["kinds"][c["kind"]]["role"] == ROLE_STILL:
+            compose(lines, c, FLOOR_TOP)
+    return b"".join(bytes(line) for line in lines)
+
+
+def expected_lines(s):
+    """The 192 visible rows of page 1, 40 bytes each."""
+    bg = expected_bg(s)
+    lines = [bytearray(40) for _ in range(FLOOR_TOP)]
+    lines += [bytearray(bg[r * 40:r * 40 + 40]) for r in range(FLOOR_ROWS)]
+    for c in creatures(s):
+        if load_art()["kinds"][c["kind"]]["role"] != ROLE_STILL:
+            compose(lines, c)
+    return lines
+
+
+def expected_page(s):
+    """Page 1 (8K) as the composition rule has it. The screen holes (the 8
+    bytes after each 120) aren't shown, so they keep what the page holds now."""
+    page = bytearray(s.page_bytes(PAGE1))
+    for y, line in enumerate(expected_lines(s)):
+        a = row_base(y, PAGE1) - (PAGE1 << 8)
+        page[a:a + 40] = line
+    return bytes(page)
+
+
+def fish_bg(s):
+    a = s.addr("FISH_BG")
+    return bytes(s.mem.ram[a:a + FLOOR_ROWS * 40])
