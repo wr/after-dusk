@@ -68,8 +68,11 @@ Memory:
 | `$6000`–`$87FF` | the resident program (10,240 bytes max) |
 | `$8800`–`$95FF` | overlay slot: the running effect's code (3,584 bytes max per effect) |
 | `$D000`–`$F5FF` | language card bank 1: pre-shifted sprites and Warp's tables, built at startup |
-| `$F600`–`$F6FF` | language card: `aux_fetch`, the copy loop that reads aux memory |
+| `$F600`–`$F6FF` | language card: `aux_fetch` and `aux_copy`, the copy loops that read aux memory |
+| `$F700`–`$FFF9` | language card: Fish!'s code that reads aux memory (copied from FX2 when it starts); `$FFFA`–`$FFFF` are the vectors, never written |
+| aux `$0800`–`$1FFF`, `$A000`–`$BFFF` | Fish!'s shift tables and a mirrored copy of its art, built when it starts |
 | aux `$2000`–`$5FFF` | the FX file: every effect's code, one after another (16K max) |
+| aux `$6000`–`$9FFF` | the FX2 file: Fish!'s code, art and floor (read in place) |
 
 Status block: `$0310` current effect (`$FF` before the first), `$0311` effects started,
 `$0312`/`$0313` steps since boot, `$0314` 1 = vertical-blank pacing, `$0315` 1 = IIc Plus.

@@ -42,6 +42,7 @@ class Mem:
         self.wr_aux = False
         self.track = False
         self.written = set()
+        self.written_aux = set()
         self.reads = set()
         self.watch_reads = ()
         self.read_hooks = {}       # address -> function() returning the byte read
@@ -71,8 +72,10 @@ class Mem:
             return
         if self.wr_aux and 0x0200 <= a < 0xC000:
             self.aux[a] = v & 0xFF
-        else:
-            self.ram[a] = v & 0xFF
+            if self.track:
+                self.written_aux.add(a)
+            return
+        self.ram[a] = v & 0xFF
         if self.track:
             self.written.add(a)
 
@@ -157,11 +160,18 @@ class Sim:
     # ---- write tracking ----
     def start_tracking(self):
         self.mem.written = set()
+        self.mem.written_aux = set()
         self.mem.track = True
 
     def writes_outside(self, *ranges):
-        """Addresses written since start_tracking that fall outside every (lo, hi) range."""
+        """Main-memory addresses written since start_tracking that fall outside
+        every (lo, hi) range."""
         out = [a for a in self.mem.written if not any(lo <= a < hi for lo, hi in ranges)]
+        return sorted(out)
+
+    def aux_writes_outside(self, *ranges):
+        """The same for writes that went to aux memory (RAMWRT on)."""
+        out = [a for a in self.mem.written_aux if not any(lo <= a < hi for lo, hi in ranges)]
         return sorted(out)
 
     # ---- screen ----

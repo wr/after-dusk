@@ -71,20 +71,37 @@ WRCARDRAM = $C005             ; writes to aux
 FXRAM     = $0800             ; $0800-$1FFF
 FXRAM_END = $2000
 
-; ---- Fish! (effect 14): main memory while it runs ----
-; Page 1 is the only page it shows; its art sits in page 2. FISH_ART and
-; its code (FISH_CODE, FISH_CODE2) are copied from FX2 in whole pages, so
-; each copy runs on to the end of its last page. The floor stays in FX2, in
-; aux; FISH_BG is built from it.
-FISH_ART   = $4000            ; $4000-$5D1F every frame of every kind (copy runs to $5DFF)
-FISH_BLKB  = $5D20            ; $5D20-$5DA7 a copy of the drawing code's block A, made at init
-FISH_CODE  = $5E00            ; $5E00-$5FFF the drawing code that won't fit the overlay
+; ---- Fish! (effect 14): memory while it runs ----
+; Page 1 is the only page it shows. Page 2 holds each slot's cache (its
+; frame pre-shifted to its place: 216 bytes of lit dots, then at +256 the
+; mask inverted, so neither crosses a page), two pages of transparent and
+; empty bytes for the columns a creature misses, the eight kernel bodies
+; (built at init from column templates) and four copies of the three-layer
+; floor one for rows with four or more creatures. FXRAM holds
+; the live background and the drawing code that patches itself (FISH_CODE2,
+; copied from FX2 at init: the overlay is never written). The code that reads
+; aux memory runs from the language card (FISH_LC, copied from FX2 at init).
 FISH_BG    = $0800            ; $0800-$0D9F live background: rows 156-191, 40 bytes each
-FISH_REV   = $0E00            ; $0E00-$0E7F 7-bit bit-reverse table, and
-FISH_IREV  = $0E80            ; $0E80-$0EFF the same inverted (half pages: lookups never cross)
-FISH_CODE2 = $0F00            ; $0F00-$14FF code: Fish!'s that won't fit the overlay
-FISH_SHT   = $1500            ; $1500-$1BFF shift tables: shift k in page $15+k
-FISH_STATE = $1C00            ; $1C00-$1FFF creatures and scheduler
+FISH_CODE2 = $0E00            ; $0E00-$1BFF code copied from FX2 at init
+FISH_STATE = $1C00            ; $1C00-$1FFF creatures, renderer and scheduler
+FISH_CACHE = $4000            ; $4000-$53FF ten caches of 512 bytes
+FISH_ZERO  = $5400            ; $5400-$54FF 256 x 0 (and $5500 is its mask: the pages a
+FISH_TRANSP = $5500           ; $5500-$55FF 256 x $7F   layer misses read, like a cache)
+FISH_PASS  = $5600            ; $5600-$58EB the pass kernels (4 x 187 bytes), made at init
+FISH_BODY  = $5900            ; $5900-$5EFF the eight kernel bodies (192 bytes apart), made at init
+FISH_LC    = $F700            ; $F700-$FFF9 code that reads aux memory (after aux_fetch)
+FISH_LC_END = $FFFA           ; the vectors: never written
+; Aux memory: the art stays in FX2 (5 bytes a row), and fish_init builds the
+; shift tables, the bit-reverse table and a mirrored copy of every swimmer's
+; frames there (the shift reads them with RAMRD on, so they must all be in
+; aux). FX ($2000-$5FFF) and FX2 ($6000-$9FFF) are never written.
+FISH_SHT   = $0800            ; aux $0800-$0EFF shift tables: shift k in page $08+k
+FISH_ISHT  = $0F00            ; aux $0F00-$15FF the same, inverted (masks)
+FISH_REV   = $1600            ; aux $1600-$167F 7-bit bit-reverse table
+FISH_MIRB  = $1680            ; aux $1680-$1FFF mirrored frames that don't fit area A (none today)
+FISH_MIRB_END = $2000
+FISH_MIRA  = $A000            ; aux $A000-$BFFF mirrored frames
+FISH_MIRA_END = $C000
 
 ; ---- tables built at start-up in the language card (after the sprites) ----
 sar4    = $F000

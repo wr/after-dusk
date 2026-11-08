@@ -1,319 +1,392 @@
-; Fish!'s row renderer (included by fx_fish.s, in segment FX14).
+; Fish!'s cache engine (included by fx_fish.s: FISHCODE2 for the code that
+; patches itself as it draws, FISHLC for the part that reads aux memory,
+; and the overlay for init's part and the tables).
+;
+; Every slot keeps a cache in page 2: its frame shifted into place, 216
+; bytes of lit dots (36 rows x 6 bytes, X = row x 6) and, 256 bytes on, the
+; mask inverted, so a row over something is bg AND maski OR lit; neither
+; part crosses a page. A cache is built from the frame in aux (plain, or
+; the mirrored copy init makes for a swimmer facing left; frames are 5 bytes
+; a row) through the shift tables, also in aux, by lc_build: 121 cycles a
+; row, once per hop for the lit dots, and only when the creature is over the
+; floor or in front of another for the mask. fish_locate works out a slot's
+; place (frame, cache column, shift, box) when it moves; after that the box
+; is read, not worked out.
 ;
 ; The caller names a rectangle of at most 8 bytes by any number of rows
-; (FR_C0..FR_C1-1, FR_R0..FR_R1-1). fish_rect_begin lists the creatures that
-; touch it; fish_rect_rows rebuilds its rows top to bottom by the composition
-; rule (the background, FISH_BG on the floor and black above it, then every
-; creature but Seaweed in slot order: screen = screen AND NOT mask OR lit),
-; writing each screen byte once, so nothing flickers. It stops before a row
-; its budget can't pay for, and carries on from there next time.
+; (FR_C0..FR_C1-1, FR_R0..FR_R1-1). fish_rect_begin lists the slots whose
+; boxes touch it; fish_rect_rows draws it top to bottom in runs of rows
+; holding the same creatures. A run is drawn by one of eight straight-line
+; kernels (black or the floor, 0-3 layers; built at init from column
+; templates), unrolled for 8 columns right to left and entered at the
+; rectangle's width, with every layer's operands patched in for the run:
+; column j of layer L reads L's cache at column j - cL when that is 0-5,
+; else a page of 0 (lit) and $7F (mask). Rows with four or more creatures
+; go through the pass kernels, copies of the three-layer floor kernel
+; composing three at a time through the row buffer W. Every screen byte is
+; written once a row.
 ;
-; Two stages make a row. Stage 1 shifts one creature's row of lit dots and
-; its row of mask into the buffers LA and MA, one byte per rectangle column,
-; through FISH_SHT: out[i] = FISH_SHT[k][s(i)] | FISH_SHT[k][128 + s(i-1)].
-; Its code (a block) is patched for a creature when a run of rows begins:
-; the frame's address, the shift's page, and which buffer byte each output
-; goes to (a spare byte when it falls outside the rectangle). A creature
-; facing left is its plain row shifted by 7 - k (0 when k is 0) and written
-; right to left from column C = (X + 7wb - 1) / 7, each byte turned round by
-; FISH_REV in stage 2.
+; Every piece pays before it runs, in FR_LEFT's units of 16 cycles: a call,
+; a run's scan, each cache build, each layer patched, and its rows exactly
+; (rows x the kernel's cycles a row at the width, rounded up to a unit);
+; what doesn't fit is left for the next call, which carries on from there.
 ;
-; Stage 2 (FISHCODE, in page 2) writes the rectangle's columns right to left,
-; unrolled for 8 columns and entered at the rectangle's width. A run of rows
-; with one creature or none is a ring of patched jumps: ring_start (the
-; screen row), block A, stage 2, then a tail that pays for the next row:
-;   empty  no creature: black, or FISH_BG copied
-;   sea    one creature above the floor: screen = lit
-;   floor  one creature on the floor: screen = FISH_BG AND NOT mask OR lit
-; A run with two or more is h_mix: each creature in slot order through
-; blocks A and B in turn (patched once for two, for each when more) onto the
-; row buffer W, the first over the background and the last to the screen.
-; A run's first row pays first for finding who is in it, then for setting
-; the run up and any patching.
-;
-; FISH_BG is rebuilt by the background job (fish_bg_begin, fish_bg_rows),
-; budgeted the same way: each row the floor's bytes, read from aux (the floor
-; stays in FX2), then every Seaweed in slot order through the same blocks and
-; stage 2. Code the renderer patches as it runs lives in RAM the effect owns
-; (FISHCODE, FISHCODE2, block B), never in the overlay.
+; FISH_BG (the floor with every Seaweed) is rebuilt by the background job
+; the same way: each row the floor's bytes from aux, then the Seaweed
+; through the floor kernels in place. It lists the Seaweed and patches again
+; on every call, so creature rects may run between its calls.
 
-; ---- macros ----
-.macro SETGO go, endl, wl       ; go's jump: endl - wl
-        lda #<endl
-        sec
-        sbc wl
-        sta go+1
-        lda #>endl
-        sbc #0
-        sta go+2
-.endmacro
-
-.macro SETJ j, target           ; jump j goes to target
-        lda #<target
-        sta j+1
-        lda #>target
-        sta j+2
-.endmacro
-
-.macro COPYJ j, go              ; jump j goes where go's jump goes
-        lda go+1
-        sta j+1
-        lda go+2
-        sta j+2
-.endmacro
-
-.macro ADD40C ptr               ; the next row of FISH_BG, carry clear
-        lda ptr
-        adc #40
-        sta ptr
-        bcc :+
-        inc ptr+1
-:
-.endmacro
-
-.macro ADD40 ptr                ; the next row of FISH_BG
-        clc
-        ADD40C ptr
-.endmacro
-
-; STAGE1: a block. Step i (5..1) makes output i from source bytes i and i-1,
-; FISH_SHT[k][s(i)] | FISH_SHT[k][128 + s(i-1)], and leaves s(i-1) in X for
-; the step after; step 0 makes output 0. Patched: the shift's page (+2, +8),
-; the source byte's address (+4), the output's buffer byte (+10). Entered with
-; A = 0 and Y = its place in the frame at step wb's ldx; the mask part then
-; jumps to the lit part's entry. At the end it moves yvar on a row, sets
-; Y = RD_LAST, and jumps on (to stage 2, or to an rts when called).
-.macro STAGE1 pre, yvar
-.repeat 5, I
-.ident(.sprintf("%sm%d", pre, 5-I)):
-        lda FISH_SHT,x
-        ldx $FFFF,y
-        ora FISH_SHT+$80,x
-        sta $90
-.endrepeat
-.ident(.concat(pre, "m0")):
-        lda FISH_SHT,x
-        sta $90
-        lda #0
-        jmp 0                   ; -> the lit dots' entry
-.repeat 5, I
-.ident(.sprintf("%sl%d", pre, 5-I)):
-        lda FISH_SHT,x
-        ldx $FFFF,y
-        ora FISH_SHT+$80,x
-        sta $90
-.endrepeat
-.ident(.concat(pre, "l0")):
-        lda FISH_SHT,x
-        sta $90
-        tya
-        clc
-        adc #5                  ; wb: the next row of the frame
-        sta yvar
-        ldy RD_LAST
-.ident(.concat(pre, "end")):
-        jmp just_rts
-.endmacro
-
-; OUTPUT: output i's buffer bytes, with A = its column in the rectangle
-; (LA + column and MA + column, or $90 and $98 outside it) and X = the
-; block's offset from block B; A moves on a column (RD_T+5 = 1 or -1).
-.macro OUTPUT op
-        sta RD_T+4
-        cmp RD_WID
-        bcc :+
-        lda #16
-:       ora #LA
-        sta FISH_BLKB + op + LITD, x
-        ora #8
-        sta FISH_BLKB + op, x
-        lda RD_T+4
-        clc
-        adc RD_T+5
-.endmacro
-
-; S2END: the end of a stage-2 routine: jumps on (a ring's tail, or an rts).
-.macro S2END name
-.ident(.concat(name, "_end")):
-        jmp just_rts
-.endmacro
-
-; ---- zero page: FXZ+7 on (fx_fish.s's init uses FXZ..FXZ+6) ----
+; ---- zero page ----
+RD_T    = $10           ; 2: temporaries (the step's afford and charge too)
+WRP     = $12           ; 2: kernel: the row being written (screen, FISH_BG or W)
+RDP     = $14           ; 2: kernel: the background it reads (FISH_BG, W or zeros)
+ROWN    = $16           ; kernel: the screen row
+CNT     = $17           ; kernel, lc_build, lc_mirror: rows to go
+YLAST   = $18           ; FR_C1 - 1
+KT      = $19           ; $19-$1E temporaries
+WID     = $1F           ; FR_C1 - FR_C0
 FR_C0   = FXZ+7         ; rectangle: byte columns FR_C0..FR_C1-1 (0-40)
 FR_C1   = FXZ+8
 FR_R0   = FXZ+9         ; rows FR_R0..FR_R1-1 (0-192)
 FR_R1   = FXZ+10
 FR_ROW  = FXZ+11        ; the next row to draw
 FR_LEFT = FXZ+12        ; 2: budget, units of 16 cycles
-RD_PD   = FXZ+14        ; 2: stage 2 writes this row (the screen, or W)
-RD_PS   = FXZ+16        ; 2: and reads this one (FISH_BG, W or zeros)
-RD_YA   = FXZ+18        ; block A's place in its frame: row * wb
-RD_YB   = FXZ+19        ; block B's
-RD_NEXT = FXZ+20        ; the next row where the creatures in the row change
-FR_ZP_END = FXZ+21      ; the first byte free for the rest of Fish!
-
-; Drawing scratch Fish! has to itself: it never calls hires.s or the sprite
-; engine.
-LA      = DSX           ; 8: lit row, a byte per rectangle column
-MA      = DSX+8         ; 8: mask row
-                        ; SPX ($90, $98): where outputs outside the rectangle go
-RD_T    = $10           ; $10-$17 temporaries
-RD_S2E  = RD_T+5        ; 2: ring_setup: the stage-2 end jump to patch
-RD_LAST = $18           ; FR_C1 - 1
-RD_WID  = $19           ; FR_C1 - FR_C0, 1-8
-RD_COST = $1A           ; 2: each row's cost in this run, units
-RD_XTRA = $1C           ; 2: the run's first row costs this much more
-RD_H    = $1E           ; 2: where the run's rows start
+RD_NEXT = FXZ+14        ; the next row where the run changes
+RUN_R0  = FXZ+15        ; the run's first row: X = (row - RUN_R0) * 6
+BGR     = FXZ+16        ; 2: the background job's FISH_BG row; the pass kernels' background
+FLP     = FXZ+18        ; 2: the background job's floor row, in aux
+FR_ZP_END = FXZ+20      ; the first byte free for the rest of Fish!
+W       = DSX           ; $80-$87: the row buffer for four or more layers
+PL      = DSX+8         ; 2: patch: the L operand being patched
+PM      = DSX+10        ; 2: the MI operand (none if its high byte is 0)
+OUTP    = DSX+8         ; 2: lc_build: the cache row (a build happens before any patching)
+                        ; LSRC/LDST (DSX+12..15): aux_copy's, for the floor
+P_D     = SPX           ; patch: FR_C0 less the layer's cache column
+P_LO    = SPX+1         ; (RUN_R0 - its top) * 6
+P_HI    = SPX+2         ; its cache page
+P_ST    = SPX+3         ; the kernel's bytes per column
+WP      = SPX+4         ; 2: W - FR_C0
+SCRS    = SPX+6         ; 2: the pass kernels: the screen row while W is written
+P_I     = SPX+8         ; patching: the next active layer
+MP_J    = SPX+9         ; passes: the pass being set up,
+MP_I    = SPX+10        ;   its layer (0-2),
+MP_BODY = SPX+11        ;   2: its kernel,
+MP_TAIL = SPX+13        ;   2: and the tail the last one ends in
+WID1    = SPX+15        ; WID - 1
 
 ; ---- RAM: the renderer's, after the state arrays ----
 FISH_RD   = FISH_STATE + $48
-l_top     = FISH_RD             ; 10 each, per creature touching the rectangle:
-l_bot     = FISH_RD + 10        ;   its first row in it, the row after its last,
-l_ytop    = FISH_RD + 20        ;   y + by (low byte), its width in bytes,
-l_wb      = FISH_RD + 30
-l_mir     = FISH_RD + 40        ;   bit 7: facing left
-l_c0      = FISH_RD + 50        ;   X / 7 and X mod 7
-l_k       = FISH_RD + 60
-l_fl      = FISH_RD + 70        ;   its frame: lit rows
-l_fh      = FISH_RD + 80
-l_ml      = FISH_RD + 90        ;   and mask rows
-l_mh      = FISH_RD + 100
-rd_act    = FISH_RD + 110       ; 10: the list entries in this run of rows
-rd_w      = FISH_RD + 120       ; 8: the row buffer W
-rd_bgr    = FISH_RD + 128       ; 2: the background's row (FISH_BG or zeros)
-rd_wp     = FISH_RD + 132       ; 2: W as a row (rd_w - FR_C0)
-rd_hold   = FISH_RD + 134       ; 2: list entry blocks A, B are patched for ($FF none)
-rd_entl   = FISH_RD + 136       ; 4: blocks A, B: the lit dots' entry
-rd_entm   = FISH_RD + 140       ; 4: the mask's entry
-rd_empty  = FISH_RD + 144       ; 2: empty_go (for ring_setup)
-rd_nlist  = FISH_RD + 146
-rd_nact   = FISH_RD + 147
-rd_floor  = FISH_RD + 148       ; 1: this run is on the floor
-rd_i      = FISH_RD + 149
-rd_top    = FISH_RD + 150       ; try_list counts rows from here
-pl_ytl    = FISH_RD + 151       ; box_of: y + by
-pl_yth    = FISH_RD + 152
-pl_xl     = FISH_RD + 153       ; X: the left dot of the box as drawn
-pl_xh     = FISH_RD + 154
-pl_wb     = FISH_RD + 155
-pl_mir    = FISH_RD + 157       ; bit 7: facing left
-pl_c0     = FISH_RD + 158       ; X / 7 (signed)
-pl_k      = FISH_RD + 159       ; X mod 7
-bx_c0     = FISH_RD + 160       ; box_of: the box, clipped
-bx_c1     = FISH_RD + 161
-bx_r0     = FISH_RD + 162
-bx_r1     = FISH_RD + 163
-p_blk     = FISH_RD + 164       ; patch: the block's offset from blka
-p_col0    = FISH_RD + 165       ; output 0's rectangle column
-p_page    = FISH_RD + 166       ; the shift's page
-rd_next2  = FISH_RD + 167       ; the next row the creatures change, floor or not
-rd_kind   = FISH_RD + 168       ; this run: 0-5 as costs, 6 mixed
-rd_wm     = FISH_RD + 169       ; 4: the rectangle's width times 5, 8, 11, 15
-k_w7      = FISH_RD + 173       ; 14 each, per kind, made at init: 7 * wb,
-k_xm      = k_w7 + FISH_NKIND   ;   cw - bx - 7wb (X facing left, from x),
-k_pad     = k_xm + FISH_NKIND   ;   7wb - bw (the padding),
-k_rwb     = k_pad + FISH_NKIND  ;   rows * wb (mask from lit)
-rd_pend   = k_rwb + FISH_NKIND  ; 1 while a creature rect is pending
-bj_c0     = rd_pend + 1         ; the background job: its columns,
-bj_c1     = rd_pend + 2
-bj_row    = rd_pend + 3         ;   its next row and the row after its last,
-bj_r1     = rd_pend + 4
-bj_pend   = rd_pend + 5         ;   1 until it is finished
-bj_scan   = rd_pend + 6         ;   what looking at a row costs (this call)
-FISH_RD_END = rd_pend + 7
+sl_vis    = FISH_RD             ; 10 each, per slot (fish_locate): its box shows,
+sl_lit    = FISH_RD + 10        ;   its cache's lit dots are built,
+sl_msk    = FISH_RD + 20        ;   and its mask,
+sl_c0     = FISH_RD + 30        ;   cache column X / 7 (signed), shift X mod 7,
+sl_k      = FISH_RD + 40
+sl_top    = FISH_RD + 50        ;   y + by (low byte),
+sl_r0     = FISH_RD + 60        ;   its box clipped: rows,
+sl_r1     = FISH_RD + 70
+sl_bc0    = FISH_RD + 80        ;   columns,
+sl_bc1    = FISH_RD + 90
+sl_srcl   = FISH_RD + 100       ;   its frame in aux (lit rows; mask rows r5 on),
+sl_srch   = FISH_RD + 110
+sl_rows   = FISH_RD + 120       ;   its rows,
+sl_bcl    = FISH_RD + 130       ;   and what a build of its lit dots (or mask) costs, in units
+sl_bch    = FISH_RD + 140
+l_slot    = FISH_RD + 150       ; 10 each, the slots listed for the rectangle:
+l_top     = FISH_RD + 160       ;   first row in it, the row after the last
+l_bot     = FISH_RD + 170
+rd_act    = FISH_RD + 180       ; 10: list entries in this run, in slot order
+rd_nlist  = FISH_RD + 190
+rd_nact   = FISH_RD + 191
+rd_pend   = FISH_RD + 192       ; 1 while a creature rect is pending
+rd_mode   = FISH_RD + 193       ; 0 the screen, 1 the background job
+rd_floor  = FISH_RD + 194       ; this run is over the floor
+rd_pass   = FISH_RD + 195       ; kernel passes: 1, or 2-4 for four or more layers
+rd_cost   = FISH_RD + 196       ; 2: a row's cycles in this run
+rd_kern   = FISH_RD + 198       ; the kernel, 0-7
+bj_c0     = FISH_RD + 199       ; the background job: its columns,
+bj_c1     = FISH_RD + 200
+bj_row    = FISH_RD + 201       ;   its next row and the row after its last,
+bj_r1     = FISH_RD + 202
+bj_pend   = FISH_RD + 203       ;   1 until it is finished
+bx_c0     = FISH_RD + 204       ; box_of: the box, clipped (for the queue)
+bx_c1     = FISH_RD + 205
+bx_r0     = FISH_RD + 206
+bx_r1     = FISH_RD + 207
+k_endlo   = FISH_RD + 208       ; 8 each: the kernel bodies' ends (their jumps), made at init
+k_endhi   = FISH_RD + 216
+FISH_RD_END = FISH_RD + 224
 .assert FISH_RD_END <= FISH_STATE + $140, error, "renderer RAM runs past FISH_STATE + $140"
 
 FISH_MAX   = 10
 ROLE_STILL = 4                  ; Seaweed: part of the background
-LITD       = blka_l5 - blka_m5  ; a block's lit part, from its mask part
-BOFF       = blka - FISH_BLKB   ; block A, from block B
-STEP1      = blka_m4 - blka_m5  ; bytes in a step
+FLOOR_OFF  = __FISHFLOOR_LOAD__ - FISH_BG       ; a FISH_BG row's floor row in aux
+PASS_LEN   = 8 * 23 + 3         ; a pass kernel: the three-layer floor body and its jump
+BODY_STEP  = 192                ; the kernel bodies, FISH_BODY on
+.assert FISH_PASS + 4 * PASS_LEN <= FISH_BODY && FISH_BODY + 8 * BODY_STEP <= $6000, error, "page 2's kernels"
 
-; ---- costs, units of 16 cycles: upper bounds, measured ----
-; fish_rect_rows charges a call FC_CALL; a run's first row FC_EVENT +
-; FC_EVPER per creature listed, then its row cost, FC_SETUP, and FC_PATCH
-; per block it patches; each row after that its row cost (a run of one or
-; none reaching the floor: FC_SWITCH more for its first row on it). A row of
-; n >= 2 costs FC_MIX + n * FC_MIXPER, and n >= 3 another n * FC_MIXNP.
-; Measured worst cases (cycles): a call that has to stop, about 155 (ten
-; listed), and about 172 when it stops at the switch to the floor after a
-; row; finding who is in a run 234 + ~145 per creature; setting it up
-; 622; a patch 654; the switch 452; rows: empty 182, sea 254 / 286 facing
-; left, floor 429 / 472; mixes, every creature facing left over the floor:
-; two 1,318, three 3,512 (4,115 for a run's first row, patching all three),
-; four 5,516, five 6,856 (all at 8 bytes wide).
-FC_CALL   = 11                  ; fish_rect_rows itself, and finding it must stop
-FC_EVENT  = 15                  ; a run's first row: finding who is in it
-FC_EVPER  = 9                   ;   per creature touching the rectangle
-FC_SETUP  = 40                  ;   setting the run up
-FC_PATCH  = 42                  ;   per block patched
-FC_SWITCH = 29                  ; a run of one or none reaching the floor
-FC_EMPTY  = 12                  ; a row with no creature
-FC_SEA_N  = 17                  ; one creature over black, facing right
-FC_SEA_M  = 19                  ;   facing left
-FC_FLR_N  = 28                  ; one creature over the floor, facing right
-FC_FLR_M  = 31                  ;   facing left
-FC_MIX    = 8                   ; two or more creatures: the row
-FC_MIXPER = 38                  ;   per creature
-FC_MIXNP  = 47                  ;   per creature, three or more (each patched)
-; fish_rect_begin: FC_BEGIN, then per slot in use FC_BEGPER, or FC_BEGFAR
-; for one whose rows miss the rectangle (measured: 149; 562; 143).
-FC_BEGIN  = 10
-FC_BEGPER = 36
-FC_BEGFAR = 10
-; The background job: fish_bg_begin costs FC_BGBEGIN (not charged: like
-; fish_rect_begin, for Task 5's estimates). fish_bg_rows charges FC_BGCALL a
-; call, FC_BGSETUP, then to list the Seaweed FC_BGANY per slot that isn't one
-; and FC_BGSLOT per Seaweed slot, each as it looks at it; FC_BGSCAN +
-; FC_BGSCANPER per Seaweed listed to look at a row, the first now and each
-; next with the row before; and each row FC_BGROW, FC_BGWROW per Seaweed
-; listed and FC_PATCH per block it patches.
-; Measured worst cases (cycles, 8 bytes wide): a call that stops before its
-; first row 580, + 73 per other slot, + 746 per Seaweed slot; a row 444,
-; + 709 per Seaweed, + a patch (654) per block patched.
-FC_BGBEGIN = 4
-FC_BGCALL  = 11
-FC_BGSETUP = 20
-FC_BGANY   = 5
-FC_BGSLOT  = 41
-FC_BGROW   = 30                 ; (a row's vbl_poll: 26 here, 32-44 on a IIc with the latch)
-FC_BGWROW  = 45
-FC_BGSCAN  = 6
-FC_BGSCANPER = 7
+; ---- costs: units of 16 cycles ----
+; Measured on py65 (tests/test_fx_fish.py's charge tests hold every call to
+; them), each with a unit or two over its worst for the cycles that move
+; with code placement (a branch across a page) and a multiply's bit pattern.
+FC_CALL   = 14                  ; fish_rect_rows itself, and finding it must stop (181)
+FC_EVENT  = 28                  ; a run's start: the scan, and a cache build's charge that fails
+FC_EVPER  = 7                   ;   per slot listed (the scan, and the cache checks; run_start multiplies by 7)
+FC_SETUP  = 19                  ;   the kernel: its jumps, entry and row cost
+FC_PATCH  = 14                  ;   per layer patched: its values and set-up, and
+FC_PATCHCOL = 9                 ;   per two columns of the rectangle (about 72 cycles a column)
+FC_PASS   = 36                  ;   per pass of four or more layers: its set-up (its three layers are patched: FC_PATCH each)
+FC_ROWS   = 34                  ;   working out the rows' charge and calling the kernel
+FC_PART   = 34                  ;   and finding how many fit when they don't all
+FC_BGCALL = 13                  ; fish_bg_rows itself, its poll, and a run that can't start
+FC_BGSETUP = 12                 ;   setting its rectangle up and the listing's fixed part
+FC_BGPER  = 7                   ;   per slot in use, listing the Seaweed (listed: 110)
+; cycles: a cache build is RC_BUILDFIX + rows x RC_BUILD; a kernel row is
+; k_loop + width x k_byte for the kernel (black or floor, 0-3 layers), and
+; RC_BGROW + width x RC_BGBYTE more in the background job (the floor's bytes
+; from aux); a row of passes is k_loop (for black or floor) + RC_MPFIX +
+; passes x (RC_MPPASS + width x RC_MPBYTE).
+RC_BUILD   = 124                ; lc_build: a row (121-123: the frame may cross a page)
+RC_BUILDFIX = 320               ; its charge, patching its operands and the call (300)
+RC_BGROW   = 90                 ; head_bg, and aux_copy's start and end
+RC_BGBYTE  = 16                 ; aux_copy, a byte
+RC_MPFIX   = 72                 ; glue0 and glue_last
+RC_MPPASS  = 22                 ; a pass's jump and glue
+RC_MPBYTE  = 39                 ; a pass kernel's byte (three layers over the floor)
+; the step's estimate (fish_est), cycles
+EST_FIXC   = 900 + 16 * (11 + FC_CALL + FC_EVENT + FC_SETUP + FC_PATCH + (7 * FC_PATCHCOL + 1) / 2 + FC_ROWS)
+                                ; fish_hop, a begin (ST_BEGIN 11), a run's start
+EST_SLOTC  = 16 * (8 + FC_EVPER); per slot in use: the listing (ST_BEGPER 8) and the scan
 
+.segment "FISHCODE2"
 ; ================================================================ entry points
 
 ; fish_box: X = slot. Its box on screen, clipped, in FR_C0..FR_R1 and carry
-; set; carry clear if none of it is on screen. Keeps X.
+; set; carry clear if none of it is on screen (as fish_locate last worked it
+; out). Y = kind. Keeps X.
 fish_box:
-        jsr box_of
-        bcc :+
-        lda bx_c0
+        ldy fish_kind,x
+        lda sl_vis,x
+        beq @no
+        lda sl_bc0,x
         sta FR_C0
-        lda bx_c1
+        lda sl_bc1,x
         sta FR_C1
-        lda bx_r0
+        lda sl_r0,x
         sta FR_R0
-        lda bx_r1
+        lda sl_r1,x
         sta FR_R1
-:       rts
+        sec
+        rts
+@no:    clc
+        rts
 
-; fish_rect_begin: lists the creatures (not Seaweed) touching the rectangle
-; in FR_C0..FR_R1, in slot order, and sets FR_ROW = FR_R0. The rect is then
-; pending until fish_rect_rows finishes it, or something abandons it: another
-; fish_rect_begin, or fish_bg_begin / fish_bg_rows.
+; box_of: X = slot. fish_locate, then its box in bx_c0..bx_r1 and carry
+; set, or carry clear if none of it is on screen. Y = kind. Keeps X.
+box_of:
+        jsr fish_locate
+        bcc @rts
+        lda sl_bc0,x
+        sta bx_c0
+        lda sl_bc1,x
+        sta bx_c1
+        lda sl_r0,x
+        sta bx_r0
+        lda sl_r1,x
+        sta bx_r1
+        sec
+@rts:   rts
+
+; fish_locate: X = slot. Works out where it is drawn from its state, into
+; the slot's sl_*: its frame in aux (by frame and facing), cache column and
+; shift from X = x + bx (x + cw - bx - 35 facing left), and its box clipped
+; (the bytes holding its bw dots, its rows); its cache is marked unbuilt.
+; Carry set if its box shows. Y = kind. Keeps X.
+fish_locate:
+        stz sl_lit,x            ; moved: its cache no longer fits
+        stz sl_msk,x
+        stz sl_vis,x
+        ldy fish_kind,x
+        lda fk_rows,y
+        sta sl_rows,x
+        phy
+        tay                     ; a build's charge: its cycles in units, rounded up
+        lda bc_lo,y
+        clc
+        adc #15
+        sta KT
+        lda bc_hi,y
+        adc #0
+        .repeat 4
+        lsr a
+        ror KT
+        .endrepeat
+        sta sl_bch,x
+        lda KT
+        sta sl_bcl,x
+        ply
+        lda fish_yl,x           ; rows y + by .. + rows - 1
+        clc
+        adc fk_by,y
+        sta sl_top,x
+        sta KT
+        lda fish_yh,x
+        adc #0
+        sta KT+1
+        bmi @top0
+        bne @off1
+        lda KT
+        cmp #192
+        bcs @off1
+        bra @top
+@off1:  jmp @off
+@top0:  lda #0
+@top:   sta sl_r0,x
+        lda KT                  ; the row after the last, or 192
+        clc
+        adc fk_rows,y
+        sta KT
+        lda KT+1
+        adc #0
+        bmi @off1
+        bne @r192
+        lda KT
+        beq @off
+        cmp #192
+        bcc @r1
+@r192:  lda #192
+@r1:    sta sl_r1,x
+        lda fish_dir,x          ; the frame and X, by facing
+        beq @right
+        lda fk_role,y
+        cmp #ROLE_STILL
+        bcs @right              ; Seaweed and Bubbles never face left
+        lda fish_frame,x
+        bne :+
+        lda fk_m0lo,y
+        sta sl_srcl,x
+        lda fk_m0hi,y
+        bra @src
+:       lda fk_m1lo,y
+        sta sl_srcl,x
+        lda fk_m1hi,y
+@src:   sta sl_srch,x
+        lda fk_pad,y            ; the drawing's dots start 35 - bw in
+        sta KT+2
+        lda fk_xm,y             ; X = x + cw - bx - 35
+        bra @add
+@right: lda fish_frame,x
+        bne :+
+        lda fk_f0lo,y
+        sta sl_srcl,x
+        lda fk_f0hi,y
+        bra :++
+:       lda fk_f1lo,y
+        sta sl_srcl,x
+        lda fk_f1hi,y
+:       sta sl_srch,x
+        stz KT+2
+        lda fk_bx,y             ; X = x + bx
+@add:   pha
+        clc
+        adc fish_xl,x
+        sta KT
+        pla
+        and #$80                ; the offset's sign
+        beq :+
+        lda #$FF
+:       adc fish_xh,x
+        sta KT+1
+        bmi @neg
+        lda KT                  ; X >= 280: off the right
+        cmp #<280
+        lda KT+1
+        sbc #>280
+        bcc @cols
+@off:   clc
+        rts
+@neg:   lda KT                  ; X + 35 <= 0: off the left
+        clc
+        adc #35
+        sta KT+3
+        lda KT+1
+        adc #0
+        bmi @off
+        ora KT+3
+        beq @off
+@cols:  phy
+        lda KT                  ; the cache column and shift, from 6 bytes on
+        clc
+        adc #42
+        tay
+        lda KT+1
+        adc #0
+        bne @hi
+        lda xmod_lo,y
+        sta sl_k,x
+        lda xbyte_lo,y
+        bra @c0
+@hi:    lda xmod_hi,y
+        sta sl_k,x
+        lda xbyte_hi,y
+@c0:    sec
+        sbc #6
+        sta sl_c0,x
+        sta KT+3
+        ply
+        lda KT+2                ; the drawing's dots: from X + pad
+        clc
+        adc sl_k,x
+        phx
+        tax                     ; the first dot's byte and dot in it
+        lda KT+3
+        clc
+        adc xbyte_lo,x
+        sta KT+4                ; the first byte
+        lda xmod_lo,x           ; bytes: up to its last dot's
+        clc
+        adc fk_bw,y
+        adc #6
+        tax
+        lda KT+4
+        clc
+        adc xbyte_lo,x
+        plx
+        dec a                   ; the last byte < 0: off the left
+        bmi @off
+        cmp #40
+        bcc :+
+        lda #39
+:       inc a
+        sta sl_bc1,x
+        lda KT+4                ; the first >= 40: off the right
+        bmi @bc00
+        cmp #40
+        bcs @off
+        bra :+
+@bc00:  lda #0
+:       sta sl_bc0,x
+        lda #$80
+        sta sl_vis,x
+        sec
+        rts
+
+; fish_rect_begin: lists the slots (not Seaweed) whose boxes touch the
+; rectangle in FR_C0..FR_R1, in slot order, and sets FR_ROW = FR_R0. The
+; rect is then pending until fish_rect_rows finishes it, or something
+; abandons it: another fish_rect_begin, or fish_bg_begin / fish_bg_rows.
 fish_rect_begin:
         lda #1
         sta rd_pend
+        stz rd_mode
         jsr vbl_poll
-        jsr rect_setup
-        stz rd_nlist
-        stz st_nrow             ; (the step pays for this by these counts)
         lda FR_R0
-        sta rd_top
         sta FR_ROW
-        sta RD_NEXT             ; the first row finds who is in it
-        stz rd_next2            ; and isn't a run going on over the floor
+        ; fall through
+; list: the slots the rectangle touches, by rd_mode (0: all but Seaweed; 1:
+; the Seaweed), with their rows in it; RD_NEXT = FR_ROW (a run starts there).
+list:   lda FR_ROW
+        sta RD_NEXT
+        stz rd_nlist
         ldx #0
 @slot:  cpx fish_n
         bcs @done
@@ -321,439 +394,158 @@ fish_rect_begin:
         lda fk_role,y
         cmp #ROLE_STILL
         beq :+
-        jsr try_list
-:       inx
+        lda #0
+        bra :++
+:       lda #1
+:       cmp rd_mode
+        bne @nx
+        lda sl_vis,x
+        beq @nx
+        lda sl_r0,x
+        cmp FR_R1
+        bcs @nx
+        lda FR_R0
+        cmp sl_r1,x
+        bcs @nx
+        lda sl_bc0,x
+        cmp FR_C1
+        bcs @nx
+        lda FR_C0
+        cmp sl_bc1,x
+        bcs @nx
+        ldy rd_nlist
+        txa
+        sta l_slot,y
+        lda sl_r0,x             ; its first row in the rect, and the row after its last
+        cmp FR_R0
+        bcs :+
+        lda FR_R0
+:       sta l_top,y
+        lda sl_r1,x
+        cmp FR_R1
+        bcc :+
+        lda FR_R1
+:       sta l_bot,y
+        inc rd_nlist
+@nx:    inx
         bra @slot
 @done:  rts
 
-; fish_rect_rows: draws rows from FR_ROW, charging each against FR_LEFT and
-; stopping before one that doesn't fit: carry clear. Carry set when the
-; rectangle is finished, and at once, drawing nothing, if it isn't pending
-; (finished already, or abandoned). The call itself costs FC_CALL: with less
-; than that in FR_LEFT, it zeroes FR_LEFT and draws nothing.
+; fish_rect_rows: draws rows from FR_ROW, paying for each piece from
+; FR_LEFT first and stopping before one that doesn't fit: carry clear.
+; Carry set when the rectangle is finished, and at once, drawing nothing, if
+; it isn't pending (finished already, or abandoned). The call itself costs
+; FC_CALL: with less than that in FR_LEFT, it zeroes FR_LEFT and draws
+; nothing.
 fish_rect_rows:
         lda rd_pend
         bne :+
         sec
         rts
-:       lda FR_LEFT             ; the call itself
-        sec
-        sbc #FC_CALL
-        sta FR_LEFT
-        bcs rr_row
-        lda FR_LEFT+1
-        beq :+
-        dec FR_LEFT+1
-        bra rr_row
-:       stz FR_LEFT
-rr_row: ldx FR_ROW
-        cpx RD_NEXT
-        beq rr_event_row
-        lda RD_COST
-        sta RD_T
-        lda RD_COST+1
-        sta RD_T+1
-        jsr charge
-        bcc rr_stop
-        jmp (RD_H)
-rr_event_row:
-        cpx FR_R1
-        bcs rr_done
-        cpx #FLOOR_TOP          ; a run of one creature or none reaching the
-        bne @find               ; floor goes on over it as it is
-        lda rd_next2
-        cmp #FLOOR_TOP+1
-        bcc @find
-        lda rd_kind
-        cmp #2
+:       lda #FC_CALL
+        jsr pay_call
+        jsr rr_loop
         bcc :+
-        cmp #4
-        bne @find
-:       jmp floor_switch
-@find:  lda #FC_EVENT             ; finding who is in it, paid for first
-        ldx rd_nlist
-        beq :++
-        clc
-:       adc #FC_EVPER
-        dex
-        bne :-
-:       sta RD_T
-        lda FR_LEFT
-        sec
-        sbc RD_T
-        tay
-        lda FR_LEFT+1
-        sbc #0
-        bcc rr_stop
-        sta FR_LEFT+1
-        sty FR_LEFT
-        ldx FR_ROW
-        jsr rr_event
-        lda RD_COST             ; then the row, the set-up and any patching
-        clc
-        adc RD_XTRA
-        sta RD_T
-        lda RD_COST+1
-        adc RD_XTRA+1
-        sta RD_T+1
-        jsr charge
-        bcc @undo
-        jsr rr_setup
-        jmp (RD_H)
-@undo:  lda FR_ROW              ; it runs again next time
-        sta RD_NEXT
-rr_stop:
-        clc
-        rts
-rr_done:
         stz rd_pend             ; finished
+:       rts
+
+; pay_call: FR_LEFT less A, or 0 if it hasn't that much.
+pay_call:
+        eor #$FF
         sec
-just_rts:
+        adc FR_LEFT
+        sta FR_LEFT
+        bcs :+
+        lda FR_LEFT+1
+        beq :++
+        dec FR_LEFT+1
+:       rts
+:       stz FR_LEFT
         rts
 
-; charge: if FR_LEFT has RD_T (2 bytes) left, takes it off: carry set.
-; Otherwise carry clear, and FR_LEFT as it was.
+; rr_loop: the rows from FR_ROW to FR_R1, run by run, while FR_LEFT pays:
+; carry set when FR_ROW reaches FR_R1.
+rr_loop:
+        lda FR_ROW
+        cmp FR_R1
+        bcs @done
+        cmp RD_NEXT
+        bne :+
+        jsr run_start           ; a run starts here
+        bcc @stop
+:       jsr rr_rows
+        bcs rr_loop
+@stop:  clc
+        rts
+@done:  sec
+        rts
+
+; charge_a: charge A units: carry set and FR_LEFT less them, or carry clear
+; and FR_LEFT as it was. Keeps X, Y.
+charge_a:
+        sta RD_T
+        stz RD_T+1
+; charge: the same for RD_T (2 bytes) units.
 charge:
         lda FR_LEFT
         sec
         sbc RD_T
-        tay
+        pha
         lda FR_LEFT+1
         sbc RD_T+1
         bcc :+
         sta FR_LEFT+1
-        sty FR_LEFT
+        pla
+        sta FR_LEFT
+        sec
+        rts
+:       pla
+        clc
+        rts
+
+; add_t: RD_T (2 bytes) += A. Keeps X, Y.
+add_t:  clc
+        adc RD_T
+        sta RD_T
+        bcc :+
+        inc RD_T+1
 :       rts
 
-
-; floor_switch: a run of one creature or none goes on over the floor: the
-; same creature, the floor's costs, stage 2 and FISH_BG's first row.
-floor_switch:
-        lda rd_kind             ; 0-1 become 2-3, 4 becomes 5
-        ora #2
-        ldy rd_kind
-        cpy #4
-        bne :+
-        lda #5
-:       sta rd_kind
-        tax
-        lda costs,x
-        clc
-        adc #FC_SWITCH
-        sta RD_T
-        stz RD_T+1
-        jsr charge
-        bcc @stop
-        lda costs,x
-        sta RD_COST
-        lda rd_next2
-        sta RD_NEXT
-        lda #1
-        sta rd_floor
-        lda #<FISH_BG
-        sta RD_PS
-        lda #>FISH_BG
-        sta RD_PS+1
-        jsr ring_setup
-        jmp ring_start
-@stop:  lda rd_kind             ; as it was
-        and #1
-        cpx #5
-        bne :+
-        lda #4
-:       sta rd_kind
-        clc
-        rts
-
-; batch: a run of one creature or none set up, its first row paid for. If
-; the budget pays for the rest too, it takes it now and stage 2 goes on to a
-; paid tail; otherwise to a tail that pays for each row. A = 0 above the
-; floor, 1 on it.
-batch:
-        asl a
-        sta RD_T+4
-        lda RD_NEXT             ; the rows after this one
-        clc
-        sbc FR_ROW
-        beq @each               ; none
-        sta RD_T                ; times the cost, into RD_T/RD_T+1
-        lda RD_COST
-        sta RD_T+1
-        lda #0
-        ldx #8
-        lsr RD_T
-:       bcc :+
-        clc
-        adc RD_T+1
-:       ror a
-        ror RD_T
-        dex
-        bne :--
-        sta RD_T+1
-        jsr charge
-        bcc @each
-        lda RD_T+4              ; paid: the paid tails
-        ora #4
-        sta RD_T+4
-@each:  ldx RD_T+4
-        ldy #1
-        lda tails,x
-        sta (RD_S2E),y
-        iny
-        lda tails+1,x
-        sta (RD_S2E),y
-        rts
-
-tails:  .word tail_sea, tail_flr, tail_sea_p, tail_flr_p
-
-; ================================================================ placement
-
-; box_of: X = slot. Its box on screen, clipped, in bx_c0..bx_r1 and carry
-; set; carry clear if none of it is on screen: the bytes holding the bw dots
-; of its drawing (the frame's 7wb dots less the padding), and its rows.
-; Also pl_c0 and pl_k for the frame's placement. Y = kind. Keeps X.
-box_of:
-        jsr box_rows
-        bcs box_cols
-        rts
-
-; box_rows: X = slot. Y = kind; its box's rows, clipped, in bx_r0/bx_r1 and
-; carry set, or carry clear if they're off screen. Keeps X.
-box_rows:
-        ldy fish_kind,x         ; rows y + by .. y + by + rows - 1
-        lda fish_yl,x
-        clc
-        adc fk_by,y
-        sta pl_ytl
-        lda fish_yh,x
-        adc #0
-        sta pl_yth
-        bmi @top0
-        bne @off0
-        lda pl_ytl
-        cmp #192
-        bcc @top
-@off0:  clc
-        rts
-@top0:  lda #0
-@top:   sta bx_r0
-        lda pl_ytl
-        clc
-        adc fk_rows,y
-        sta RD_T
-        lda pl_yth
-        adc #0
-        bmi @off0
-        bne @bot192
+; charge_cyc: charge RD_T cycles, rounded up to units. Keeps X, Y.
+charge_cyc:
         lda RD_T
-        beq @off0
-        cmp #192
-        bcc @bot
-@bot192:
-        lda #192
-@bot:   sta bx_r1
-        sec
-        rts
-
-; box_cols: X = slot, Y = kind, after box_rows: its box's columns, clipped,
-; in bx_c0/bx_c1 and carry set, or carry clear if they're off screen; and
-; pl_c0, pl_k for the frame's placement. Keeps X.
-box_cols:
-        lda fk_wb,y             ; columns: X, by facing
-        sta pl_wb
-        stz pl_mir
-        lda fish_dir,x
-        beq @right
-        lda fk_role,y
-        cmp #ROLE_STILL
-        bcs @right              ; Seaweed and Bubbles never face left
-        dec pl_mir
-        lda k_xm,y              ; X = x + cw - bx - 7wb
-        bra @add
-@right: lda fk_bx,y             ; X = x + bx
-@add:   pha
         clc
-        adc fish_xl,x
-        sta pl_xl
-        pla
-        and #$80                ; the offset's sign
-        beq :+
-        lda #$FF
-:       adc fish_xh,x
-        sta pl_xh
-        bmi @neg
-        lda pl_xl               ; X >= 280: off the right
-        cmp #<280
-        lda pl_xh
-        sbc #>280
-        bcc @cols
-@off:   clc
-        rts
-@neg:   lda pl_xl               ; X + 7wb <= 0: off the left
-        clc
-        adc k_w7,y
+        adc #15
         sta RD_T
-        lda pl_xh
-        adc #0
-        bmi @off
-        ora RD_T
-        beq @off
-@cols:  phy
-        lda pl_xl               ; X / 7 and X mod 7, from 6 bytes on
-        clc
-        adc #42
-        tay
-        lda pl_xh
-        adc #0
-        bne @hi
-        lda xmod_lo,y
-        sta pl_k
-        lda xbyte_lo,y
-        bra @c0
-@hi:    lda xmod_hi,y
-        sta pl_k
-        lda xbyte_hi,y
-@c0:    ply
-        sec
-        sbc #6
-        sta pl_c0
-        lda #0                  ; its drawing's dots: from X, or X + 7wb - bw
-        bit pl_mir              ; facing left (the padding is on the left)
-        bpl :+
-        lda k_pad,y
-:       clc
-        adc pl_k
-        phx
-        tax                     ; first dot's byte and dot in it
-        lda pl_c0
-        clc
-        adc xbyte_lo,x
-        sta RD_T+1
-        lda xmod_lo,x           ; bytes: up to its last dot's
-        clc
-        adc fk_bw,y
-        adc #6
-        tax
-        lda RD_T+1
-        clc
-        adc xbyte_lo,x
-        plx
-        dec a                   ; the last byte <= 0: off the left
-        bmi @off2
-        cmp #40
         bcc :+
-        lda #39
-:       inc a
-        sta bx_c1
-        lda RD_T+1              ; the first >= 40: off the right
-        bmi @c00
-        cmp #40
-        bcs @off2
-        bra :+
-@c00:   lda #0
-:       sta bx_c0
-        sec
-        rts
-@off2:  clc
-        rts
+        inc RD_T+1
+:       .repeat 4
+        lsr RD_T+1
+        ror RD_T
+        .endrepeat
+        bra charge
 
-; try_list: X = slot. If its box touches rows rd_top..FR_R1-1 and the
-; rectangle's columns, it goes on the list with what patching it needs.
-; Keeps X.
-try_list:
-        jsr box_rows            ; rows first: most slots are elsewhere
-        bcc @no
-        lda rd_top
-        cmp bx_r1
-        bcs @no
-        lda bx_r0
-        cmp FR_R1
-        bcs @no
-        inc st_nrow             ; (counted: begin's cost)
-        jsr box_cols            ; then columns
-        bcc @no
-        lda FR_C0
-        cmp bx_c1
-        bcs @no
-        lda bx_c0
-        cmp FR_C1
-        bcc @yes
-@no:    rts
-@yes:   phx
-        lda fish_frame,x        ; the frame: lit rows, then mask rows
-        ldx rd_nlist
-        cmp #0
-        bne @f1
-        lda fk_f0lo,y
-        sta l_fl,x
-        lda fk_f0hi,y
-        bra @f
-@f1:    lda fk_f1lo,y
-        sta l_fl,x
-        lda fk_f1hi,y
-@f:     sta l_fh,x
-        lda k_rwb,y             ; mask = lit + rows * wb
-        clc
-        adc l_fl,x
-        sta l_ml,x
-        lda l_fh,x
-        adc #0
-        sta l_mh,x
-        lda pl_ytl
-        sta l_ytop,x
-        lda bx_r0               ; first row: its top, or rd_top
-        cmp rd_top
-        bcs :+
-        lda rd_top
-:       sta l_top,x
-        lda bx_r1               ; the row after its last: or FR_R1
-        cmp FR_R1
+; mul: RD_T = A x KT+3/KT+4 (16-bit), 16-bit. KT+3/4 are shifted out. Keeps X, Y.
+mul:    sta KT+5
+        stz RD_T
+        stz RD_T+1
+@bit:   lsr KT+5
         bcc :+
-        lda FR_R1
-:       sta l_bot,x
-        lda pl_wb
-        sta l_wb,x
-        lda pl_mir
-        sta l_mir,x
-        lda pl_c0
-        sta l_c0,x
-        lda pl_k
-        sta l_k,x
-        inc rd_nlist
-        plx
-        rts
-
-; rect_setup: the rectangle's width, stage 2's length for it, and no block
-; patched for it yet.
-rect_setup:
-        lda #$FF
-        sta rd_hold
-        sta rd_hold+1
-        lda FR_C1
-        sec
-        sbc FR_C0
-        sta RD_WID
-        lda FR_C1
-        dec a
-        sta RD_LAST
-        lda RD_WID              ; w * 5, 8, 11, 15: stage 2's bytes for this
-        asl a                   ; width, by its step (5 sea, 8 sea facing
-        sta RD_T                ; left, 11 floor, 15 floor facing left)
-        asl a
-        sta RD_T+1
-        asl a
-        sta rd_wm+1             ; w*8
-        adc RD_T
-        adc RD_WID
-        sta rd_wm+2             ; w*11
-        adc RD_T+1
-        sta rd_wm+3             ; w*15
+        lda RD_T
+        clc
+        adc KT+3
+        sta RD_T
         lda RD_T+1
-        adc RD_WID
-        sta rd_wm               ; w*5
-        rts
+        adc KT+4
+        sta RD_T+1
+:       lda KT+5
+        beq @done
+        asl KT+3
+        rol KT+4
+        bra @bit
+@done:  rts
 
-; bgrow: A = a row 156-191. RD_T/RD_T+1 = its row of FISH_BG.
+; bgrow: A = a row 156-191. RD_T = its row of FISH_BG. Keeps X.
 bgrow:
         sec
         sbc #FLOOR_TOP
@@ -775,56 +567,18 @@ bgrow:
         sta RD_T+1
         rts
 
-; yoff: A = row, Y = list entry. A = (row - (y + by)) * wb, its place in
-; its frame. Keeps Y.
-yoff:
-        sec
-        sbc l_ytop,y
-        ldx l_wb,y
-        ; fall through
-; times_wb: A * X, for X = 1-5 (the product under 256).
-times_wb:
-        sta RD_T+6
-        dex
-        beq @done               ; 1
-        asl a
-        dex
-        beq @done               ; 2
-        dex
-        beq @add                ; 3
-        asl a
-        dex
-        beq @done               ; 4
-@add:   clc                     ; 3, 5
-        adc RD_T+6
-@done:  rts
-
-; calls: blocks and stage 2 return to their callers (for h_mix and the
-; background job).
-calls:
-        SETGO go_p1a, s2_p1a_end, rd_wm+2
-        SETGO go_flrm, s2_flrm_end, rd_wm+3
-        SETGO go_copy, s2_copy_end, rd_wm
-        SETJ blka_end, just_rts
-        SETJ blkb_end, just_rts
-        SETJ s2_p1a_end, just_rts
-        SETJ s2_flrm_end, just_rts
-        SETJ s2_copy_end, just_rts
-        rts
-
-; ================================================================ runs of rows
-
-; scan_row: X = a row. rd_act/rd_nact: the list entries in it, in slot
-; order; RD_NEXT: the next row where that changes, by FR_R1.
+; ================================================================ a run
+; scan_row: X = a row. rd_act/rd_nact: the list entries in it, in slot order;
+; RD_NEXT: the next row where that changes (by FR_R1, and at the floor's top).
 scan_row:
-        stx RD_T+7
+        stx KT
         lda FR_R1
         sta RD_NEXT
         stz rd_nact
         ldy #0
 @scan:  cpy rd_nlist
         bcs @done
-        lda RD_T+7
+        lda KT
         cmp l_top,y
         bcc @before
         cmp l_bot,y
@@ -842,599 +596,1156 @@ scan_row:
         sta RD_NEXT
 @after: iny
         bra @scan
-@done:  rts
-
-; rr_event: X = FR_ROW. Finds the creatures in this row and the next row
-; where that changes, and sets the run's costs.
-rr_event:
-        jsr scan_row
-        lda RD_NEXT             ; and at the floor's top
-        sta rd_next2
-        ldx RD_T+7
-        cpx #FLOOR_TOP
+@done:  lda KT                  ; a run never crosses onto the floor
+        cmp #FLOOR_TOP
         bcs :+
+        lda RD_NEXT
         cmp #FLOOR_TOP
         bcc :+
         lda #FLOOR_TOP
         sta RD_NEXT
-:       ldx #0                  ; rd_floor: 1 on the floor
-        lda RD_T+7
+:       rts
+
+; run_start: a run begins at FR_ROW. Pays for the scan, then for each cache
+; build it needs and each layer it patches, as it goes; sets the kernel up
+; for the run (rd_kern, rd_pass, rd_cost, the jumps and operands). Carry
+; clear if something couldn't be paid for: RD_NEXT = FR_ROW, so the next
+; call starts the run again.
+run_start:
+        lda rd_nlist            ; FC_EVENT + FC_EVPER (7) per slot listed
+        asl a
+        asl a
+        asl a
+        sec
+        sbc rd_nlist
+        clc
+        adc #FC_EVENT
+        jsr charge_a
+        bcc @nob
+        lda FR_ROW
+        sta RUN_R0
+        ldx FR_ROW
+        jsr scan_row
+        ldx #0
+        lda FR_ROW
         cmp #FLOOR_TOP
         bcc :+
         inx
 :       stx rd_floor
-        lda #FC_SETUP           ; the extra: setting the run up, and patching
-        sta RD_XTRA
-        stz RD_XTRA+1
-        stz RD_COST+1
-        ldx rd_nact
-        bne @some
-        lda rd_floor            ; empty: 4 above the floor, 5 on it
-        ora #4
-        bra @set
-@some:  cpx #2
-        bcs @mix
-        ldx #0                  ; one: block A, handler 0-3
-        jsr need
-        ldy rd_act
-        lda l_mir,y
-        asl a
-        lda rd_floor
-        rol a                   ; 2 * floor + facing left
-@set:   sta rd_kind
+        lda FR_C1
+        sec
+        sbc FR_C0
+        sta WID
+        dec a
+        sta WID1
+        ldy #0                  ; the caches the run needs
+@bld:   cpy rd_nact
+        bcs @built
+        ldx rd_act,y
+        lda l_slot,x
         tax
-        lda costs,x
-        sta RD_COST
-        rts
-@mix:   lda #6                  ; two or more
-        sta rd_kind
-        lda #FC_MIX
-        sta RD_COST
-        ldx #0
-@each:  lda #FC_MIXPER
-        jsr add_cost
-        lda rd_nact
-        cmp #3
-        bcc :+
-        lda #FC_MIXNP           ; three or more: patched each row
-        jsr add_cost
-        bra :++
-:       jsr need                ; two: blocks A, B, if not patched already
-:       inx
-        cpx rd_nact
-        bcc @each
-        rts
-
-; need: X = 0 or 1. The run's first row pays for a patch unless block X is
-; already patched for creature X of the run. Keeps X.
-need:
-        ldy rd_act,x
-        tya
-        cmp rd_hold,x
-        beq :+
-        lda RD_XTRA
-        clc
-        adc #FC_PATCH
-        sta RD_XTRA
-        bcc :+
-        inc RD_XTRA+1
-:       rts
-
-add_cost:
-        clc
-        adc RD_COST
-        sta RD_COST
-        bcc :+
-        inc RD_COST+1
-:       rts
-
-costs:  .byte FC_SEA_N, FC_SEA_M, FC_FLR_N, FC_FLR_M, FC_EMPTY, FC_EMPTY
-
-; rr_setup: a run's first row, paid for: the background's row, the blocks
-; patched, the ring's jumps (or h_mix), and the creatures' places in their
-; frames.
-rr_setup:
-        jsr empty_a
+        lda sl_lit,x
+        bne :+
+        jsr build_lit
+        bcc @nob
+:       tya                     ; the first layer above the floor needs no mask
+        bne :+
         lda rd_floor
+        beq @nxb
+:       lda sl_msk,x
+        bne @nxb
+        jsr build_msk
+        bcc @nob
+@nxb:   iny
+        bra @bld
+@nob:   jmp no_budget
+@built: lda rd_nact
+        cmp #4
+        bcc :+
+        jmp run_many
+:       asl a                   ; the kernel: floor + 2 x layers
+        ora rd_floor
+        sta rd_kern
+        lda #1
+        sta rd_pass
+        jsr patch_units         ; FC_SETUP, and a layer's patching per layer
+        sta KT+5
+        ldx rd_nact
+        lda #FC_SETUP
+        clc
+:       dex
+        bmi :+
+        adc KT+5
+        bra :-
+:       jsr charge_a
+        bcc @nob
+        jsr set_jumps           ; the head; the tail in KT+3/4
+        ldx rd_kern
+        lda k_endlo,x           ; the body's end jumps to the tail
+        sta KT+1
+        lda k_endhi,x
+        sta KT+2
+        ldy #1
+        lda KT+3
+        sta (KT+1),y
+        iny
+        lda KT+4
+        sta (KT+1),y
+        lda k_step,x
+        sta P_ST
+        jsr body_entry          ; the head goes to its entry for the width
+        sta entry_j+1
+        lda KT+2
+        sta entry_j+2
+        txa                     ; column 7's code, the body's start: the end
+        asl a                   ; less 8 x step
+        asl a
+        asl a
+        adc #7
+        tay
+        lda k_endlo,x
+        sec
+        sbc k_wstep,y
+        sta KT+3
+        lda k_endhi,x
+        sbc #0
+        sta KT+4
+        stz P_I                 ; each layer's operands
+@layer: lda P_I
+        cmp rd_nact
+        bcs @cost
+        lda rd_floor            ; its offsets: floor x 3 + layer
+        asl a
+        adc rd_floor
+        adc P_I
+        tax
+        lda KT+3
+        clc
+        adc off_l,x
+        sta PL
+        lda KT+4
+        adc #0
+        sta PL+1
+        lda off_m,x
+        bmi :+
+        clc
+        adc KT+3
+        sta PM
+        lda KT+4
+        adc #0
+        sta PM+1
+        bra :++
+:       lda PL                  ; no mask operand: its stores land on L's,
+        sta PM                  ; which are written last
+        lda PL+1
+        sta PM+1
+:       ldy P_I
+        jsr layer_values
+        jsr patch_layer
+        inc P_I
+        bra @layer
+@cost:  ldx rd_kern             ; a row: loop + width x byte
+        jsr k_index
+        lda k_rowlo,y
+        sta rd_cost
+        lda k_rowhi,y
+        sta rd_cost+1
+        ; fall through
+; bg_cost: the background job's row: the floor's bytes from aux. Carry set.
+bg_cost:
+        lda rd_mode
+        beq @rts
+        lda WID                 ; RC_BGROW + width x RC_BGBYTE (16 a byte)
+        asl a
+        asl a
+        asl a
+        asl a
+        clc
+        adc #RC_BGROW
+        adc rd_cost
+        sta rd_cost
+        bcc @rts
+        inc rd_cost+1
+@rts:   sec
+        rts
+no_budget:
+        lda FR_ROW
+        sta RD_NEXT
+        clc
+        rts
+
+; patch_units: A = KT+5 = what patching one layer costs for width WID:
+; FC_PATCH + (WID x FC_PATCHCOL + 1) / 2. Keeps X, Y.
+patch_units:
+        lda WID
+        asl a
+        asl a
+        asl a
+        adc WID                 ; x 9
+        inc a
+        lsr a
+        adc #FC_PATCH           ; (carry clear: the sum is under 128)
+        sta KT+5
+        rts
+
+; set_jumps: the loop's head by rd_mode, and in KT+3/4 the tail the bodies
+; end in, by rd_mode, rd_floor and rd_pass.
+set_jumps:
+        ldx #0
+        lda rd_mode
         beq :+
-        lda FR_ROW              ; on the floor: FISH_BG's row
+        ldx #2
+        lda #<tail_bg
+        ldy #>tail_bg
+        bra @tail
+:       lda rd_floor
+        beq @sea
+        lda rd_pass
+        cmp #2
+        bcs @mp
+        lda #<tail_flr_scr
+        ldy #>tail_flr_scr
+        bra @tail
+@mp:    lda #<tail_mp
+        ldy #>tail_mp
+        bra @tail
+@sea:   lda #<tail_sea
+        ldy #>tail_sea
+@tail:  sta KT+3
+        sty KT+4
+        lda heads,x
+        sta head_j+1
+        lda heads+1,x
+        sta head_j+2
+        rts
+heads:  .word head_scr, head_bg
+
+; body_entry: A (low) and KT+2 (high) = the entry for width WID of the
+; kernel X's body whose end is KT+1/KT+2: the end less the width's bytes.
+; Keeps X.
+body_entry:
+        jsr k_index
+        lda KT+1
+        sec
+        sbc k_wstep,y
+        bcs :+
+        dec KT+2
+:       rts
+
+; k_index: Y = kernel X's index for width WID into the k_row and k_wstep
+; tables: kernel x 8 + WID - 1. Keeps X.
+k_index:
+        txa
+        asl a
+        asl a
+        asl a
+        adc WID
+        dec a
+        tay
+        rts
+
+; layer_values: Y = the active layer. Its slot's P_D, P_LO, P_HI for
+; patching. Keeps Y.
+layer_values:
+        ldx rd_act,y
+        lda l_slot,x
+        tax
+        lda FR_C0
+        sec
+        sbc sl_c0,x
+        sta P_D
+        lda RUN_R0
+        sec
+        sbc sl_top,x
+        sta RD_T
+        asl a
+        adc RD_T
+        asl a
+        sta P_LO                ; (row - top) * 6
+        txa
+        asl a
+        adc #>FISH_CACHE
+        sta P_HI
+        rts
+
+; patch_layer: one layer's operands in WID columns, P_ST bytes apart, from
+; column 0: PL = column 7's L operand (the body's start plus the layer's
+; offset), PM = its MI operand (PL itself when the layer has none). Column j
+; reads the cache at P_LO + P_D + j when that column is 0-5, else the empty
+; page (L) and the transparent page (MI): a mask's page is the page after
+; its lit dots' in both cases.
+patch_layer:
+        lda WID
+        sta KT+5
+        lda P_ST                ; column 0 is 7 columns on from PL
+        asl a
+        asl a
+        asl a
+        sec
+        sbc P_ST
+        tay
+        lda P_ST                ; (and the next column is a step less, from the high byte)
+        inc a
+        sta RD_T
+@col:   lda P_D
+        cmp #6
+        bcs @miss
+        clc
+        adc P_LO                ; the cache row's byte, and its page
+        ldx P_HI
+        bra @put
+@miss:  lda #0                  ; the empty page (its mask, the transparent one, is the next)
+        ldx #>FISH_ZERO
+@put:   sta (PL),y
+        sta (PM),y
+        iny
+        txa
+        inc a
+        sta (PM),y              ; (the mask's high byte first: with no mask operand PM
+        txa                     ; is PL, and L's is written last)
+        sta (PL),y
+        tya
+        sec
+        sbc RD_T
+        tay
+        inc P_D
+        dec KT+5
+        bne @col
+        rts
+
+; run_many: four or more layers: rd_pass passes of three through W, each a
+; pass kernel (a copy of the three-layer floor body) with its own operands;
+; pass 1 reads the background (black: the empty page), each next one W, the
+; last writes the row. Pays FC_SETUP, and per pass FC_PASS and three layers'
+; FC_PATCH (the last pass's spare layers are patched transparent).
+run_many:
+        ldx rd_nact
+        lda passes-4,x
+        sta rd_pass
+        tax
+        lda #FC_SETUP           ; FC_SETUP, and per pass FC_PASS and three layers' patching
+        sta RD_T
+        stz RD_T+1
+        jsr patch_units
+        asl a
+        adc KT+5
+        adc #FC_PASS
+        sta KT+5
+:       lda KT+5
+        jsr add_t
+        dex
+        bne :-
+        jsr charge
+        bcs :+
+        jmp no_budget
+:       jsr set_jumps
+        lda KT+3
+        sta MP_TAIL
+        lda KT+4
+        sta MP_TAIL+1
+        lda #<glue0             ; the head goes to glue0
+        sta entry_j+1
+        lda #>glue0
+        sta entry_j+2
+        lda #<W                 ; WP = W - FR_C0
+        sec
+        sbc FR_C0
+        sta WP
+        lda #>W
+        sbc #0
+        sta WP+1
+        lda #23
+        sta P_ST
+        stz P_I
+        lda #<FISH_PASS
+        sta MP_BODY
+        lda #>FISH_PASS
+        sta MP_BODY+1
+        lda #1
+        sta MP_J
+@pass:  lda MP_BODY             ; the pass kernel's end: body + 184
+        clc
+        adc #<(8 * 23)
+        sta KT+1
+        lda MP_BODY+1
+        adc #>(8 * 23)
+        sta KT+2
+        ldx #7
+        jsr body_entry          ; its entry, into the glue before it: glue0,
+        pha                     ; glue_last, or glue_m(pass - 1)
+        ldx MP_J
+        cpx #1
+        bne :+
+        ldx #0
+        bra @gin
+:       cpx rd_pass
+        bne :+
+        ldx #3
+        bra @gin
+:       dex
+@gin:   txa
+        asl a
+        tax
+        lda glue_ops,x
+        sta RD_T
+        lda glue_ops+1,x
+        sta RD_T+1
+        pla
+        sta (RD_T)
+        ldy #1
+        lda KT+2
+        sta (RD_T),y
+        lda MP_J                ; its end jumps to the glue after it, or the tail
+        cmp rd_pass
+        bne :+
+        lda MP_TAIL
+        ldy MP_TAIL+1
+        bra @end
+:       inc a
+        cmp rd_pass
+        bne :+
+        lda #<glue_last
+        ldy #>glue_last
+        bra @end
+:       ldx MP_J
+        lda glue_mid_lo-1,x
+        ldy glue_mid_hi-1,x
+@end:   pha
+        lda MP_BODY             ; the jump's operand: body + 185
+        clc
+        adc #<(8 * 23 + 1)
+        sta RD_T
+        lda MP_BODY+1
+        adc #>(8 * 23 + 1)
+        sta RD_T+1
+        pla
+        sta (RD_T)
+        tya
+        ldy #1
+        sta (RD_T),y
+        stz MP_I                ; its three layers (the rest transparent)
+@lay:   lda MP_I                ; column 7's operands: body + 6 + 6 x layer (L)
+        asl a                   ; and 3 less (MI)
+        adc MP_I
+        asl a
+        clc
+        adc #6
+        clc
+        adc MP_BODY
+        sta PL
+        lda MP_BODY+1
+        adc #0
+        sta PL+1
+        lda PL
+        sec
+        sbc #3
+        sta PM
+        lda PL+1
+        sbc #0
+        sta PM+1
+        ldy P_I
+        cpy rd_nact
+        bcs @pad
+        jsr layer_values
+        bra :+
+@pad:   lda #99                 ; no layer: every column misses
+        sta P_D
+:       jsr patch_layer
+        inc P_I
+        inc MP_I
+        lda MP_I
+        cmp #3
+        bcc @lay
+        lda MP_BODY             ; the next pass
+        clc
+        adc #<PASS_LEN
+        sta MP_BODY
+        lda MP_BODY+1
+        adc #>PASS_LEN
+        sta MP_BODY+1
+        inc MP_J
+        lda MP_J
+        cmp rd_pass
+        bcc :+
+        bne @done
+:       jmp @pass
+@done:  lda #RC_MPBYTE          ; a row: the loop (black or floor), the glue, and
+        sta KT+3                ; the passes
+        stz KT+4
+        lda WID
+        jsr mul
+        lda RD_T
+        clc
+        adc #RC_MPPASS
+        sta KT+3
+        lda RD_T+1
+        adc #0
+        sta KT+4
+        lda rd_pass
+        jsr mul
+        ldx rd_floor
+        lda RD_T
+        clc
+        adc k_loop,x
+        sta rd_cost
+        lda RD_T+1
+        adc #0
+        sta rd_cost+1
+        lda rd_cost
+        clc
+        adc #RC_MPFIX
+        sta rd_cost
+        bcc :+
+        inc rd_cost+1
+:       jmp bg_cost
+passes: .byte 2, 2, 2, 3, 3, 3, 4               ; 4-10 layers
+glue_ops: .word glue0_j+1, glue_m1_j+1, glue_m2_j+1, glue_last_j+1
+glue_mid_lo: .byte <glue_m1, <glue_m2
+glue_mid_hi: .byte >glue_m1, >glue_m2
+
+; rr_rows: the rows of the run from FR_ROW: all of them if FR_LEFT pays,
+; else as many as it pays for in 64, 32, 16, 8, 4, 2 or 1 (FC_ROWS first for
+; the arithmetic, FC_PART more when they don't all fit); carry clear if none.
+; The rows are charged in cycles: FR_LEFT x 16 less the rows' cycles, back
+; to units rounded down (a budget of 4,096 units or more pays for anything).
+rr_rows:
+        lda #FC_ROWS            ; working out the charge, paid for first
+        jsr charge_a
+        bcs :+
+@no1:   jmp @no
+:       lda RD_NEXT
+        sec
+        sbc FR_ROW
+        sta KT                  ; rows left in the run
+        lda rd_cost
+        sta KT+3
+        lda rd_cost+1
+        sta KT+4
+        lda KT
+        jsr mul                 ; RD_T = their cycles
+        lda FR_LEFT+1
+        cmp #$10
+        bcc :+
+        jsr charge_cyc          ; (no budget to speak of: pay exactly)
+        lda KT
+        jmp @some
+:       lda FR_LEFT             ; FR_LEFT in cycles, KT+3/4
+        sta KT+3
+        lda FR_LEFT+1
+        .repeat 4
+        asl KT+3
+        rol a
+        .endrepeat
+        sta KT+4
+        lda KT+3                ; the whole run?
+        sec
+        sbc RD_T
+        tay
+        lda KT+4
+        sbc RD_T+1
+        bcc @part
+        sta KT+4
+        sty KT+3
+        lda KT
+        bra @paid
+@part:  lda #FC_PART            ; some of them: the tries, paid for first
+        jsr charge_a
+        bcc @no1
+        lda FR_LEFT             ; (FR_LEFT again, in cycles)
+        sta KT+3
+        lda FR_LEFT+1
+        .repeat 4
+        asl KT+3
+        rol a
+        .endrepeat
+        sta KT+4
+        lda rd_cost             ; 64 rows' cycles (16 when 64 would pass 65,535),
+        sta RD_T                ; halved for each smaller try
+        lda rd_cost+1
+        .repeat 4
+        asl RD_T
+        rol a
+        .endrepeat
+        ldx #16
+        cmp #$40
+        bcs :+
+        asl RD_T
+        rol a
+        asl RD_T
+        rol a
+        ldx #64
+:       sta RD_T+1
+        txa
+@try:   cmp KT
+        beq :+
+        bcs @half
+:       sta KT+1
+        lda KT+3
+        sec
+        sbc RD_T
+        tay
+        lda KT+4
+        sbc RD_T+1
+        bcs @fits
+        lda KT+1
+@half:  lsr RD_T+1
+        ror RD_T
+        lsr a
+        bne @try
+@no:    clc
+        rts
+@fits:  sta KT+4
+        sty KT+3
+        lda KT+1
+@paid:  pha                     ; what is left, in units
+        .repeat 4
+        lsr KT+4
+        ror KT+3
+        .endrepeat
+        lda KT+3
+        sta FR_LEFT
+        lda KT+4
+        sta FR_LEFT+1
+        pla
+@some:  sta KT+1
+        jsr kernel_call
+        lda FR_ROW
+        clc
+        adc KT+1
+        sta FR_ROW
+        sec
+        rts
+
+; kernel_call: A rows from FR_ROW through the kernel set up for the run.
+kernel_call:
+        sta CNT
+        lda FR_ROW
+        sta ROWN
+        sec
+        sbc RUN_R0
+        sta KT+2
+        asl a
+        adc KT+2
+        asl a
+        tax                     ; X = (row - RUN_R0) * 6
+        lda FR_C1
+        dec a
+        sta YLAST
+        lda rd_mode
+        bne @bg
+        lda rd_floor
+        beq @black
+        lda FR_ROW              ; the floor: FISH_BG's row
+        jsr bgrow
+        lda rd_pass
+        cmp #2
+        bcs :+
+        lda RD_T
+        sta RDP
+        lda RD_T+1
+        sta RDP+1
+        bra @go
+:       lda RD_T
+        sta BGR
+        lda RD_T+1
+        sta BGR+1
+        bra @go
+@black: lda rd_pass
+        cmp #2
+        bcc @go
+        lda #<FISH_ZERO         ; the passes' background: zeros
+        sec
+        sbc FR_C0
+        sta BGR
+        lda #>FISH_ZERO
+        sbc #0
+        sta BGR+1
+        bra @go
+@bg:    lda FR_ROW              ; the background job: FISH_BG's row, and the floor's
         jsr bgrow
         lda RD_T
-        sta RD_PS
-        sta rd_bgr
+        sta BGR
+        clc
+        adc #<FLOOR_OFF
+        sta FLP
         lda RD_T+1
-        sta RD_PS+1
-        sta rd_bgr+1
-:       lda #<ring_start
-        sta RD_H
-        lda #>ring_start
-        sta RD_H+1
-        lda rd_nact
-        bne :+
-        jmp ring_setup          ; none
-:       cmp #2
-        bcc @one
-        lda #<rd_w              ; two or more: W as a row, and above the
-        sec                     ; floor, zeros for the background
-        sbc FR_C0
-        sta rd_wp
-        lda #>rd_w
-        sbc #0
-        sta rd_wp+1
-        lda rd_floor
-        bne :+
-        lda #<zero8
-        sec
-        sbc FR_C0
-        sta rd_bgr
-        lda #>zero8
-        sbc #0
-        sta rd_bgr+1
-:       lda #<h_mix
-        sta RD_H
-        lda #>h_mix
-        sta RD_H+1
-        jsr calls
-        lda rd_nact
-        cmp #3
-        bcc :+
-        lda #$FF                ; three or more: patched as they come
-        sta rd_hold
-        sta rd_hold+1
-        rts
-:       ldx #1
-        ldy rd_act+1
-        jsr hold
-        ldx #0
-        ldy rd_act
-        jmp hold
-@one:   ldx #0
-        ldy rd_act
-        jsr hold
-        ; fall through
+        sta BGR+1
+        adc #>FLOOR_OFF
+        sta FLP+1
+@go:    jmp kloop
 
-; ring_setup: the ring's jumps for this run's kind (0-5), then batch: into
-; block A's lit dots (sea), its mask (floor) or empty_go (none); from there
-; into the kind's stage 2; and from that to a tail.
-ring_setup:
-        ldx rd_kind
-        lda k_in,x              ; ring_j: an entry word
-        tay
-        lda rd_entl,y
-        sta ring_j+1
-        lda rd_entl+1,y
-        sta ring_j+2
-        lda k_j_lo,x            ; block A's end (or empty_j) jumps into its
-        sta RD_T+2              ; stage 2 at the rectangle's width: the
-        lda k_j_hi,x            ; end less the width's bytes
-        sta RD_T+3
-        lda k_end_lo,x
-        sta RD_S2E              ; (and that end goes to a tail)
-        ldy k_wm,x
-        sec
-        sbc rd_wm,y
-        ldy #1
-        sta (RD_T+2),y
-        lda k_end_hi,x
-        sta RD_S2E+1
-        sbc #0
-        iny
-        sta (RD_T+2),y
-        lda k_floor,x
-        jmp batch
-
-; per kind: sea plain, sea facing left, floor plain, floor left, empty sea,
-; empty floor
-k_in:   .byte 0, 0, rd_entm - rd_entl, rd_entm - rd_entl, rd_empty - rd_entl, rd_empty - rd_entl
-k_wm:     .byte 0, 1, 2, 3, 0, 0          ; stage 2's step: 5, 8, 11, 15
-k_j_lo:   .byte <blka_end, <blka_end, <blka_end, <blka_end, <empty_j, <empty_j
-k_j_hi:   .byte >blka_end, >blka_end, >blka_end, >blka_end, >empty_j, >empty_j
-k_end_lo: .byte <s2_sean_end, <s2_seam_end, <s2_p1a_end, <s2_flrm_end, <s2_sean_end, <s2_copy_end
-k_end_hi: .byte >s2_sean_end, >s2_seam_end, >s2_p1a_end, >s2_flrm_end, >s2_sean_end, >s2_copy_end
-k_floor:  .byte 0, 0, 1, 1, 0, 1
-
-; hold: X = block (0 or 1), Y = list entry. Patches the block for it if it
-; isn't already, and finds its place in its frame for FR_ROW. Keeps X.
-hold:
-        tya
-        cmp rd_hold,x
-        beq :+
-        sta rd_hold,x
-        phx
-        lda blk_off,x
+; ================================================================ the kernels
+; The loop: head (the row's pointers; the background job also copies the
+; floor's bytes in), the body for the width, the tail (on a row, and back
+; to its head). Each body ends in a jump patched to the run's tail, or to
+; the glue between passes.
+kloop:
+head_j: jmp head_scr            ; patched: head_scr or head_bg (the first row)
+head_scr:
+        ldy ROWN
+        lda row_lo,y
+        sta WRP
+        lda row_hi,y
+        sta WRP+1
+kgo:    ldy YLAST
+entry_j: jmp $FFFF              ; patched: the body's entry, or glue0
+head_bg:
+        lda BGR
+        sta WRP
+        sta RDP
+        clc
+        adc FR_C0
+        sta LDST
+        lda BGR+1
+        sta WRP+1
+        sta RDP+1
+        adc #0
+        sta LDST+1
+        lda FLP
+        clc
+        adc FR_C0
+        sta LSRC
+        lda FLP+1
+        adc #0
+        sta LSRC+1
+        ldy WID1
+        jsr aux_copy
+        bra kgo
+tail_flr_scr:                   ; a floor run on screen: FISH_BG's next row
+        lda RDP
+        clc
+        adc #40
+        sta RDP
+        bcc tail_sea
+        inc RDP+1
+tail_sea:
+        txa
+        clc
+        adc #6
         tax
-        jsr patch
-        plx
-        ldy rd_hold,x
-:       lda FR_ROW
-        phx
-        jsr yoff
-        plx
-        sta RD_YA,x
+        inc ROWN
+        dec CNT
+        bne head_scr
+        rts
+tail_mp:                        ; passes over the floor: BGR on a row
+        lda BGR
+        clc
+        adc #40
+        sta BGR
+        bcc tail_sea
+        inc BGR+1
+        bra tail_sea
+tail_bg:                        ; the background job: FISH_BG's and the floor's next rows
+        lda BGR
+        clc
+        adc #40
+        sta BGR
+        bcc :+
+        inc BGR+1
+:       lda FLP
+        clc
+        adc #40
+        sta FLP
+        bcc :+
+        inc FLP+1
+:       txa
+        clc
+        adc #6
+        tax
+        inc ROWN
+        dec CNT
+        bne head_bg
+        rts
+glue0:                          ; before pass 1: the row to W, the background from BGR
+        lda WRP
+        sta SCRS
+        lda WRP+1
+        sta SCRS+1
+        lda BGR
+        sta RDP
+        lda BGR+1
+        sta RDP+1
+        lda WP
+        sta WRP
+        lda WP+1
+        sta WRP+1
+glue0_j: jmp $FFFF
+glue_m1:                        ; before pass 2 (of 3 or 4): over W
+        lda WP
+        sta RDP
+        lda WP+1
+        sta RDP+1
+        ldy YLAST
+glue_m1_j: jmp $FFFF
+glue_m2:                        ; before pass 3 (of 4)
+        lda WP
+        sta RDP
+        lda WP+1
+        sta RDP+1
+        ldy YLAST
+glue_m2_j: jmp $FFFF
+glue_last:                      ; before the last pass: over W, to the row
+        lda WP
+        sta RDP
+        lda WP+1
+        sta RDP+1
+        lda SCRS
+        sta WRP
+        lda SCRS+1
+        sta WRP+1
+        ldy YLAST
+glue_last_j: jmp $FFFF
+
+; The bodies, made at init (fish_draw_init) in page 2 from these column
+; templates: 8 columns each, column 7 first, each column's code P_ST bytes,
+; then a jump; the operands (L: a layer's lit dots; MI: its mask inverted)
+; are patched per run.
+tmpl0:  lda #0                  ; black, no layer
+        sta (WRP),y
+        dey
+tmpl1:  lda (RDP),y             ; the floor, no layer
+        sta (WRP),y
+        dey
+tmpl2:  lda $FFFF,x             ; black, one layer: L1 at +1
+        sta (WRP),y
+        dey
+tmpl3:  lda (RDP),y             ; floor, one (11 bytes): MI1 +3, L1 +6
+        and $FFFF,x
+        ora $FFFF,x
+        sta (WRP),y
+        dey
+tmpl4:  lda $FFFF,x             ; black, two: L1 +1, MI2 +4, L2 +7
+        and $FFFF,x
+        ora $FFFF,x
+        sta (WRP),y
+        dey
+tmpl5:  lda (RDP),y             ; floor, two (17): MI1 +3, L1 +6, MI2 +9, L2 +12
+        and $FFFF,x
+        ora $FFFF,x
+        and $FFFF,x
+        ora $FFFF,x
+        sta (WRP),y
+        dey
+tmpl6:  lda $FFFF,x             ; black, three: L1 +1, MI2 +4, L2 +7, MI3 +10, L3 +13
+        and $FFFF,x
+        ora $FFFF,x
+        and $FFFF,x
+        ora $FFFF,x
+        sta (WRP),y
+        dey
+tmpl7:  lda (RDP),y             ; floor, three (23): MI1 +3, L1 +6, ..., MI3 +15, L3 +18
+        and $FFFF,x
+        ora $FFFF,x
+        and $FFFF,x
+        ora $FFFF,x
+        and $FFFF,x
+        ora $FFFF,x
+        sta (WRP),y
+        dey
+tmpl_end:
+.assert tmpl1 - tmpl0 = 5 && tmpl2 - tmpl1 = 5 && tmpl3 - tmpl2 = 6 && tmpl4 - tmpl3 = 11, error, "a template's size"
+.assert tmpl5 - tmpl4 = 12 && tmpl6 - tmpl5 = 17 && tmpl7 - tmpl6 = 18 && tmpl_end - tmpl7 = 23, error, "a template's size"
+tmpl_lo: .byte <tmpl0, <tmpl1, <tmpl2, <tmpl3, <tmpl4, <tmpl5, <tmpl6, <tmpl7
+tmpl_hi: .byte >tmpl0, >tmpl1, >tmpl2, >tmpl3, >tmpl4, >tmpl5, >tmpl6, >tmpl7
+
+; make_body: A = kernel (0-7), KT+1/2 = where. Its template 8 times, then a
+; jump; the end (the jump) in KT+1/2 after. Keeps X.
+make_body:
+        tay
+        lda tmpl_lo,y
+        sta KT+3
+        lda tmpl_hi,y
+        sta KT+4
+        lda k_step,y
+        sta KT+5
+        lda #8
+        sta KT
+@col:   ldy #0
+:       lda (KT+3),y
+        sta (KT+1),y
+        iny
+        cpy KT+5
+        bne :-
+        tya
+        clc
+        adc KT+1
+        sta KT+1
+        bcc :+
+        inc KT+2
+:       dec KT
+        bne @col
+        lda #$4C                ; jmp
+        sta (KT+1)
         rts
 
-blk_off:  .byte <BOFF, 0       ; blocks A and B, from block B
-
-; empty_a: nothing in the buffers, so stage 2 copies the background.
-empty_a:
-.repeat 16, I
-        stz LA+I
-.endrepeat
-        rts
-
-; ================================================================ stage 1
-; Block A is the first thing in FISHCODE; block B is a copy of it made at
-; init (fish_draw_init) at FISH_BLKB, BOFF bytes before it, so one patch
-; routine reaches either with X = BOFF or 0. They differ only in whose place
-; they move on (RD_YA, RD_YB). Both write LA and MA.
-OM5     = blka_m5 - blka        ; a step's offset in its block
-OM1     = blka_m1 - blka
-OM0     = blka_m0 - blka
-OL0     = blka_l0 - blka
-BLKLEN  = blka_end + 3 - blka
-blkb_end = FISH_BLKB + (blka_end - blka)
-.assert OM5 = 0, error, "a block starts with step 5"
-.assert STEP1 = 11, error, "a step is 11 bytes"
-.assert OL0 + 13 = blka_end - blka, error, "blka_l0's layout"
-.assert BOFF < 256 && BLKLEN <= BOFF, error, "block B doesn't fit before block A"
-.assert MA = LA + 8, error, "MA follows LA"
-
-
-; ================================================================ stage 2
-; In page 2 (FISHCODE, copied there by fish_init). Each is unrolled for 8
-; columns, right to left: column j of the rectangle uses buffer byte j and
-; Y = FR_C0 + j. go_X jumps in at the rectangle's width (rect_setup); each
-; ends with a patched jump.
-.segment "FISHCODE"
-
-blka:   STAGE1 "blka_", RD_YA
-
-s2_sean:                        ; screen = LA
-.repeat 8, I
-        lda LA+7-I
-        sta (RD_PD),y
-        dey
-.endrepeat
-        S2END "s2_sean"
-
-s2_seam:                        ; screen = REV(LA)
-.repeat 8, I
-        ldx LA+7-I
-        lda FISH_REV,x
-        sta (RD_PD),y
-        dey
-.endrepeat
-        S2END "s2_seam"
-
-go_flrm: jmp s2_flrm            ; (RD_PD) = (RD_PS) AND NOT REV(MA) OR REV(LA)
-s2_flrm:
-.repeat 8, I
-        ldx MA+7-I
-        lda FISH_IREV,x
-        and (RD_PS),y
-        ldx LA+7-I
-        ora FISH_REV,x
-        sta (RD_PD),y
-        dey
-.endrepeat
-        S2END "s2_flrm"
-
-go_p1a: jmp s2_p1a              ; (RD_PD) = (RD_PS) AND NOT MA OR LA
-s2_p1a:
-.repeat 8, I
-        lda (RD_PS),y
-        ora MA+7-I
-        eor MA+7-I
-        ora LA+7-I
-        sta (RD_PD),y
-        dey
-.endrepeat
-        S2END "s2_p1a"
-
-zero8:  .res 8, 0               ; a row of nothing, for mixes over black
-
-.assert s2_sean_end - s2_sean = 8 * 5, error, "s2_sean steps"
-.assert s2_seam_end - s2_seam = 8 * 8, error, "s2_seam steps"
-.assert s2_flrm_end - s2_flrm = 8 * 15, error, "s2_flrm steps"
-.assert s2_p1a_end - s2_p1a = 8 * 11, error, "s2_p1a steps"
-
+; per kernel (black or floor x 0-3 layers): bytes a column, and a row's
+; cycles: the loop (measured 49 and 63), and per byte (measured 10, 12, 20,
+; 28 over black, 13, 21, 29, 37 over the floor, one more when FISH_BG's
+; row crosses a page)
+k_step: .byte 5, 5, 6, 11, 12, 17, 18, 23
+k_loop: .byte 49, 63, 49, 63, 49, 63, 49, 63
+k_byte: .byte 10, 14, 12, 22, 20, 30, 28, 38
+; and by kernel x 8 + width - 1: a row's cycles (k_loop + width x k_byte),
+; and the width's bytes of body (the entry is the body's end less that)
 .segment "FX14"
+k_rowlo:
+        .byte $3B, $45, $4F, $59, $63, $6D, $77, $81, $4D, $5B, $69, $77, $85, $93, $A1, $AF
+        .byte $3D, $49, $55, $61, $6D, $79, $85, $91, $55, $6B, $81, $97, $AD, $C3, $D9, $EF
+        .byte $45, $59, $6D, $81, $95, $A9, $BD, $D1, $5D, $7B, $99, $B7, $D5, $F3, $11, $2F
+        .byte $4D, $69, $85, $A1, $BD, $D9, $F5, $11, $65, $8B, $B1, $D7, $FD, $23, $49, $6F
+k_rowhi:
+        .byte $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+        .byte $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+        .byte $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $01, $01
+        .byte $00, $00, $00, $00, $00, $00, $00, $01, $00, $00, $00, $00, $00, $01, $01, $01
+k_wstep:
+        .byte $05, $0A, $0F, $14, $19, $1E, $23, $28, $05, $0A, $0F, $14, $19, $1E, $23, $28
+        .byte $06, $0C, $12, $18, $1E, $24, $2A, $30, $0B, $16, $21, $2C, $37, $42, $4D, $58
+        .byte $0C, $18, $24, $30, $3C, $48, $54, $60, $11, $22, $33, $44, $55, $66, $77, $88
+        .byte $12, $24, $36, $48, $5A, $6C, $7E, $90, $17, $2E, $45, $5C, $73, $8A, $A1, $B8
+.segment "FISHCODE2"
+; a layer's operands in a column: black layers 1-3, floor layers 1-3
+off_l:  .byte 1, 7, 13, 6, 12, 18
+off_m:  .byte $FF, 4, 10, 3, 9, 15
 
-; ================================================================ FISHCODE2
-; Copied to FISH_CODE2 by fish_init (FXRAM): the code it patches as it goes
-; (the ring, s2_copy), and the colder code. Code in the overlay is never
-; written.
+; ================================================================ caches
+; build_lit, build_msk: X = slot. Its cache's lit dots (or mask) built, paid
+; for first (sl_bcl/bch: RC_BUILDFIX + rows x RC_BUILD cycles, in units):
+; carry clear if FR_LEFT can't. Keeps X, Y.
+build_lit:
+        phy
+        jsr build_charge
+        bcc :+
+        jsr cache_lit
+        sec
+:       ply
+        rts
+build_msk:
+        phy
+        jsr build_charge
+        bcc :+
+        jsr cache_msk
+        sec
+:       ply
+        rts
+
+build_charge:
+        lda sl_bcl,x
+        sta RD_T
+        lda sl_bch,x
+        sta RD_T+1
+        jmp charge
+.segment "FX14"
+; a build's cycles by its rows: RC_BUILDFIX + rows x RC_BUILD
+bc_lo:  .repeat 37, R
+        .byte <(RC_BUILDFIX + R * RC_BUILD)
+        .endrepeat
+bc_hi:  .repeat 37, R
+        .byte >(RC_BUILDFIX + R * RC_BUILD)
+        .endrepeat
 .segment "FISHCODE2"
 
-; ---- the ring: a run of rows with one creature or none ----
-; The tails: stage 2 done with a row, the next if it's in the run. A run
-; paid for in full when it began takes tail_flr_p or tail_sea_p; otherwise
-; tail_flr or tail_sea pay for each row and stop when the budget runs out.
-tail_flr:
-        ADD40C RD_PS            ; FISH_BG's next row (carry is clear)
-tail_sea:
-        inc FR_ROW
-        ldx FR_ROW
-        cpx RD_NEXT
-        beq tail_run
-        lda FR_LEFT
-        sec
-        sbc RD_COST             ; under 256
-        bcs :+
-        ldy FR_LEFT+1
-        beq tail_stop
-        dec FR_LEFT+1
-:       sta FR_LEFT
-        bra ring_x
-tail_flr_p:
-        ADD40C RD_PS
-tail_sea_p:
-        inc FR_ROW
-        ldx FR_ROW
-        cpx RD_NEXT
-        beq tail_run
-; ring_x: a row, paid for, X = FR_ROW. The screen row, then block A (or
-; empty_go), stage 2, and a tail.
-ring_x: lda row_lo,x
-        sta RD_PD
-        lda row_hi,x
-        sta RD_PD+1
-        ldy RD_YA
-        lda #0
-ring_j: jmp 0                   ; -> block A's entry, or empty_go
-empty_go:
-        ldy RD_LAST
-        clc                     ; for tail_flr (a block leaves it clear)
-empty_j:
-        jmp 0                   ; -> stage 2
-ring_start:                     ; the run's first row
-        ldx FR_ROW
-        bra ring_x
-tail_run:
-        jmp rr_row
-tail_stop:
-        jmp rr_stop
-
-go_copy: jmp s2_copy            ; (RD_PD) = (RD_PS): FISH_BG to the screen
-s2_copy:
-.repeat 8
-        lda (RD_PS),y
-        sta (RD_PD),y
-        dey
-.endrepeat
-        S2END "s2_copy"
-.assert s2_copy_end - s2_copy = 8 * 5, error, "s2_copy steps"
-
-
-; fish_draw_init: each kind's k_w7, k_xm, k_pad, k_rwb, and block B, a copy
-; of block A moving on RD_YB.
-fish_draw_init:
-        ldy #FISH_NKIND-1
-@kind:  lda fk_wb,y
-        tax
-        asl a
-        asl a
-        asl a
-        sec
-        sbc fk_wb,y
-        sta k_w7,y
-        sec
-        sbc fk_bw,y
-        sta k_pad,y
-        lda fk_cw,y
-        sec
-        sbc fk_bx,y
-        sec
-        sbc k_w7,y
-        sta k_xm,y
-        lda fk_rows,y
-        jsr times_wb
-        sta k_rwb,y
-        dey
-        bpl @kind
-        ldx #0
-:       lda blka,x
-        sta FISH_BLKB,x
-        inx
-        cpx #BLKLEN
-        bne :-
-        lda #RD_YB
-        sta FISH_BLKB + OL0 + 10
-        lda #<empty_go
-        sta rd_empty
-        lda #>empty_go
-        sta rd_empty+1
-        stz rd_pend             ; no creature rect, no background job
-        stz bj_pend
-        rts
-
-; h_mix: a row with two or more creatures. Creature i of the run goes
-; through block i AND 1 onto W, from the background (the first) or W, and
-; the last from W to the screen.
-h_mix:
-        stz rd_i
-@one:   jsr empty_a
-        lda rd_i
-        and #1
-        tax
-        lda rd_nact
-        cmp #3
-        bcc :+
-        ldy rd_i                ; three or more: patch it
-        lda rd_act,y
-        tay
-        jsr hold
-:       ldy RD_YA,x
+; fish_cache: X = slot (located). Its cache built now, lit dots and mask
+; (init, and the tests). Keeps X.
+fish_cache:
+        jsr cache_lit
+        ; fall through
+; cache_msk: X = slot. Its mask, inverted, from its frame's mask rows
+; through the inverted shift table, into its cache at +256. Keeps X.
+cache_msk:
+        ldy fish_kind,x
+        lda sl_srcl,x
+        clc
+        adc fk_r5,y
+        sta KT
+        lda sl_srch,x
+        adc #0
+        sta KT+1
         txa
         asl a
-        tax
-        lda #0
-        jsr @mask
-        lda rd_wp               ; onto W
-        sta RD_PD
-        sta RD_PS
-        lda rd_wp+1
-        sta RD_PD+1
-        sta RD_PS+1
-        lda rd_i
-        bne :+
-        lda rd_bgr              ; the first from the background
-        sta RD_PS
-        lda rd_bgr+1
-        sta RD_PS+1
-:       ldy rd_i
-        ldx rd_act,y
-        inc rd_i
-        lda rd_i
-        cmp rd_nact
-        bcc :+
-        ldy FR_ROW              ; the last to the screen
-        lda row_lo,y
-        sta RD_PD
-        lda row_hi,y
-        sta RD_PD+1
-:       ldy RD_LAST
-        lda l_mir,x
-        bmi :+
-        jsr go_p1a
-        bra :++
-:       jsr go_flrm
-:       lda rd_i
-        cmp rd_nact
-        bcc @one
-        lda rd_floor
-        beq @next
-        ADD40 rd_bgr
-@next:  inc FR_ROW
-        jmp rr_row
-@mask:  jmp (rd_entm,x)
-
-; ================================================================ patching
-
-; patch: X = the block's offset from block B (BOFF for A, 0 for B), Y =
-; list entry. Patches the block's stage 1 for that creature in this
-; rectangle: the shift's page, which buffer byte each output goes to (column
-; p_col0 + i, or - i facing left; $90/$98 outside the rectangle), the source
-; bytes' addresses and the entries.
-patch:
-        stx p_blk
-        lda l_mir,y
-        sta RD_T+6
-        lda l_k,y               ; the shift and output 0's column
-        ldx l_c0,y
-        bit RD_T+6
-        bpl @col
-        txa                     ; facing left: C = c0 + wb, shift 7 - k;
-        clc                     ; C = c0 + wb - 1, shift 0 when k = 0
-        adc l_wb,y
-        tax
-        lda l_k,y
-        bne :+
-        dex
-        bra @col
-:       eor #$FF
-        sec
-        adc #7
-@col:   clc
+        adc #>FISH_CACHE + 1
+        sta KT+2
+        lda sl_k,x
+        clc
+        adc #>FISH_ISHT
+        sta KT+3
+        lda #$7F
+        sta lcb_f+1
+        lda #$3D                ; and abs,x
+        jsr cache_go
+        lda #1
+        sta sl_msk,x
+        rts
+; cache_lit: X = slot. Its lit dots from its frame through the shift table.
+cache_lit:
+        lda sl_srcl,x
+        sta KT
+        lda sl_srch,x
+        sta KT+1
+        txa
+        asl a
+        adc #>FISH_CACHE
+        sta KT+2
+        lda sl_k,x
+        clc
         adc #>FISH_SHT
-        sta p_page
-        txa
-        sec
-        sbc FR_C0
-        sta p_col0              ; in the rectangle's columns
-        ldx p_blk               ; the shift's page in every step
-        lda p_page
-.repeat 5, I
-        sta FISH_BLKB + OM5 + I * STEP1 + 2, x
-        sta FISH_BLKB + OM5 + I * STEP1 + 8, x
-        sta FISH_BLKB + OM5 + LITD + I * STEP1 + 2, x
-        sta FISH_BLKB + OM5 + LITD + I * STEP1 + 8, x
-.endrepeat
-        sta FISH_BLKB + OM0 + 2, x
-        sta FISH_BLKB + OM0 + LITD + 2, x
-        lda #1                  ; outputs 0-5, a column on (or back) each
-        bit RD_T+6
-        bpl :+
-        lda #$FF
-:       sta RD_T+5
-        lda p_col0
-        OUTPUT OM0 + 4
-.repeat 5, I
-        OUTPUT OM5 + (4 - I) * STEP1 + 10
-.endrepeat
-        lda l_fh,y              ; the source bytes: s(j) in step j+1
-.repeat 5, J                    ; (gen_fish.py: no run of 5 crosses a page)
-        sta FISH_BLKB + OM1 - J * STEP1 + LITD + 5, x
-.endrepeat
-        lda l_mh,y
-.repeat 5, J
-        sta FISH_BLKB + OM1 - J * STEP1 + 5, x
-.endrepeat
-        lda l_fl,y
-.repeat 5, J
-        sta FISH_BLKB + OM1 - J * STEP1 + LITD + 4, x
-  .if J < 4
-        inc a
-  .endif
-.endrepeat
-        lda l_ml,y
-.repeat 5, J
-        sta FISH_BLKB + OM1 - J * STEP1 + 4, x
-  .if J < 4
-        inc a
-  .endif
-.endrepeat
-        lda l_wb,y
-        sta RD_T+4
-        txa                     ; the block as a pointer, for the entries
-        clc
-        adc #<FISH_BLKB
-        sta RD_T+6
-        lda #>FISH_BLKB
-        adc #0
-        sta RD_T+7
-        ldx p_blk               ; its width, for the next row's place
-        ldy RD_T+4
-        tya
-        sta FISH_BLKB + OL0 + 8, x
-        lda entry_off-1,y       ; the entries: s(wb-1) in step wb
-        clc
-        adc RD_T+6
-        sta RD_T
-        lda RD_T+7
-        adc #0
-        sta RD_T+1
-        ldy #2                  ; A's entries first, then B's
-        cpx #0
-        beq :+
-        ldy #0
-:       lda RD_T
-        sta rd_entm,y
-        clc
-        adc #<LITD
-        sta rd_entl,y
-        sta FISH_BLKB + OM0 + 8, x
-        lda RD_T+1
-        sta rd_entm+1,y
-        adc #0
-        sta rd_entl+1,y
-        sta FISH_BLKB + OM0 + 9, x
+        sta KT+3
+        stz lcb_f+1
+        lda #$1D                ; ora abs,x
+        jsr cache_go
+        lda #1
+        sta sl_lit,x
+        rts
+; cache_go: A = the combining opcode, KT = the frame rows (aux), KT+2 =
+; the cache page, KT+3 = the shift table's page; lc_build patched (OUTP =
+; the cache) and called for sl_rows,x rows. Keeps X.
+cache_go:
+        .repeat 5, I
+        sta .ident(.sprintf("lcb_c%d", I))
+        .endrepeat
+        lda KT
+        .repeat 5, I
+        sta .ident(.sprintf("lcb_s%d", I)) + 1
+        .endrepeat
+        lda KT+1
+        .repeat 5, I
+        sta .ident(.sprintf("lcb_s%d", I)) + 2
+        .endrepeat
+        stz OUTP
+        lda KT+2
+        sta OUTP+1
+        lda KT+3
+        .repeat 5, I
+        sta .ident(.sprintf("lcb_c%d", I)) + 2
+        sta .ident(.sprintf("lcb_t%d", I)) + 2
+        .endrepeat
+        lda sl_rows,x
+        sta CNT
+        phx
+        jsr lc_build
+        plx
         rts
 
-; entry_off: from a block's start, its entry for a width of 1-5 bytes: step
-; wb's ldx.
-entry_off:
-.repeat 5, I
-        .byte OM5 + (4 - I) * STEP1 + 3
-.endrepeat
+; fish_est: X = slot. RD_T = the units its next hop will be charged, from
+; its place: fish_hop, a begin and a run's start (EST_FIXC, EST_SLOTC per
+; slot in use), its lit dots built, its mask too if its box reaches the
+; floor, and its rows composed one byte wider than its box (a hop's rect
+; is its old box joined with its new) over black or the floor by where its
+; rows are (Bubbles: FISH_HOP more rows, all over black). A = low, Y = high.
+; Keeps X.
+fish_est:
+        phx
+        stx P_I
+        lda #<EST_FIXC
+        sta KT+1
+        lda #>EST_FIXC
+        sta KT+2
+        lda #EST_SLOTC
+        sta KT+3
+        stz KT+4
+        lda fish_n
+        jsr mul
+        jsr est_add
+        ldy fish_kind,x
+        lda fk_rows,y
+        sta KT                  ; rows
+        jsr est_build
+        ldx P_I
+        ldy fish_kind,x
+        lda fk_role,y           ; rows over black and over the floor
+        cmp #ROLE_RISE
+        bne @swim
+        lda KT
+        clc
+        adc #FISH_HOP
+        sta KT
+        sta P_D                 ; (P_D: rows over black; P_LO: over the floor)
+        stz P_LO
+        bra @rows
+@swim:  lda #FLOOR_TOP          ; over black: FLOOR_TOP - top, 0..rows
+        sec
+        sbc sl_top,x
+        bcs :+
+        lda #0
+:       cmp KT
+        bcc :+
+        lda KT
+:       sta P_D
+        lda KT
+        sec
+        sbc P_D
+        sta P_LO
+        beq @rows
+        jsr est_build           ; over the floor: its mask too
+        ldx P_I
+@rows:  lda sl_vis,x            ; its rect's width: the box's and one more
+        beq :+
+        lda sl_bc1,x
+        sec
+        sbc sl_bc0,x
+        inc a
+        cmp #9
+        bcc :++
+:       lda #8
+:       sta WID
+        lda #2                  ; a row over black
+        jsr est_row
+        lda P_D
+        jsr mul
+        jsr est_add
+        lda #3                  ; and over the floor
+        jsr est_row
+        lda P_LO
+        jsr mul
+        jsr est_add
+        lda KT+1                ; units
+        clc
+        adc #15
+        sta RD_T
+        lda KT+2
+        adc #0
+        .repeat 4
+        lsr a
+        ror RD_T
+        .endrepeat
+        sta RD_T+1
+        tay
+        lda RD_T
+        plx
+        rts
+; est_row: A = a one-layer kernel (2 black, 3 floor): KT+3/4 = a row's cycles
+; for width WID.
+est_row:
+        tax
+        jsr k_index
+        lda k_rowlo,y
+        sta KT+3
+        lda k_rowhi,y
+        sta KT+4
+        rts
+; est_build: KT+1/2 += a build of KT rows. Keeps Y.
+est_build:
+        ldx KT
+        lda bc_lo,x
+        sta RD_T
+        lda bc_hi,x
+        sta RD_T+1
+; est_add: KT+1/2 += RD_T. Keeps X, Y.
+est_add:
+        lda KT+1
+        clc
+        adc RD_T
+        sta KT+1
+        lda KT+2
+        adc RD_T+1
+        sta KT+2
+        rts
 
 ; ================================================================ background job
-; (FISHCODE2, in FXRAM: copied there by fish_init before anything uses it.)
-
 ; fish_bg_begin: sets up a job to rebuild FISH_BG in the rectangle in
-; FR_C0..FR_R1 (at most 8 bytes wide, as fish_box gives them; rows clipped to
-; 156-191): each row the floor's bytes, then every Seaweed in slot order.
-; fish_bg_rows does the work. It abandons a pending creature rect (Task 5
+; FR_C0..FR_R1 (at most 8 bytes wide, as fish_box gives them; rows clipped
+; to 156-191): each row the floor's bytes, then every Seaweed in slot order.
+; fish_bg_rows does the work. It abandons a pending creature rect (the step
 ; never starts a job while one is pending).
 fish_bg_begin:
         stz rd_pend
@@ -1442,7 +1753,7 @@ fish_bg_begin:
         sta bj_c0
         lda FR_C1
         sta bj_c1
-        lda FR_R1               ; rows up to 191 (FISH_REV follows FISH_BG)
+        lda FR_R1               ; rows up to 191
         cmp #192
         bcc :+
         lda #192
@@ -1457,12 +1768,13 @@ fish_bg_begin:
         rts
 
 ; fish_bg_rows: rebuilds the job's rows of FISH_BG from where it stopped,
-; charging each against FR_LEFT before doing it, with the same units and
-; rule as fish_rect_rows: carry set when the job is finished (or there is
-; none), carry clear when it stopped before a row that didn't fit. FR_LEFT =
-; $FFFF finishes it. The job's state is its own: creature rects may begin,
-; run and finish between calls, and each call lists the Seaweed and patches
-; its blocks again. A call abandons a pending creature rect (Task 5 never
+; paying for each piece from FR_LEFT first, with the same units and rule as
+; fish_rect_rows: carry set when the job is finished (or there is none),
+; carry clear when it stopped before something that didn't fit. FR_LEFT =
+; $FFFF finishes it. The call itself costs FC_BGCALL (saturating, like
+; FC_CALL), then FC_BGSETUP + FC_BGPER per slot to list the Seaweed again
+; (and patch again as it goes): creature rects may begin, run and finish
+; between calls. A call abandons a pending creature rect (the step never
 ; calls it while one is pending) and leaves FR_C0..FR_ROW its own.
 fish_bg_rows:
         stz rd_pend
@@ -1470,189 +1782,346 @@ fish_bg_rows:
         bne :+
         sec
         rts
-:       jsr vbl_poll            ; once a call, and once a row
-        lda FR_LEFT             ; the call itself
-        sec
-        sbc #FC_BGCALL
-        sta FR_LEFT
-        bcs @list
-        lda FR_LEFT+1
-        beq :+
-        dec FR_LEFT+1
-        bra @list
-:       stz FR_LEFT
-@list:  lda #FC_BGSETUP         ; then setting up
-        jsr charge_a
-        bcs :+
-        jmp @stop
-:       lda bj_c0               ; the job's rectangle, from its next row
+:       jsr vbl_poll
+        lda #FC_BGCALL
+        jsr pay_call
+        lda #FC_BGSETUP
+        ldx fish_n
+        beq :++
+        clc
+:       adc #FC_BGPER
+        dex
+        bne :-
+:       jsr charge_a
+        bcc @stop
+        lda #1
+        sta rd_mode
+        lda bj_c0
         sta FR_C0
         lda bj_c1
         sta FR_C1
         lda bj_row
         sta FR_R0
-        sta rd_top
+        sta FR_ROW
         lda bj_r1
         sta FR_R1
-        jsr rect_setup
-        jsr calls
-        stz rd_nlist
-        ldx #0                  ; and listing the Seaweed, each slot paid for
-@slot:  cpx fish_n              ; as it is looked at
-        bcs @scan
+        jsr list
+        jsr rr_loop
+        php
+        lda FR_ROW
+        sta bj_row
+        plp
+        bcc @stop
+        stz bj_pend             ; finished
+        rts
+@stop:  clc
+        rts
+
+; fish_bg_floor: all of FISH_BG built: the floor's rows copied from aux, then
+; every Seaweed's box through the background job, with no budget (init,
+; and after a change to the Seaweed set). In the overlay: it is never
+; patched.
+.segment "FX14"
+fish_bg_floor:
+        lda #<FISH_BG
+        sta LDST
+        lda #>FISH_BG
+        sta LDST+1
+        lda #<__FISHFLOOR_LOAD__
+        sta LSRC
+        lda #>__FISHFLOOR_LOAD__
+        sta LSRC+1
+        ldx #192 - FLOOR_TOP
+@row:   ldy #39
+        jsr aux_copy
+        lda LDST
+        clc
+        adc #40
+        sta LDST
+        bcc :+
+        inc LDST+1
+:       lda LSRC
+        clc
+        adc #40
+        sta LSRC
+        bcc :+
+        inc LSRC+1
+:       dex
+        bne @row
+        ldx #0                  ; then every Seaweed in its box
+@slot:  cpx fish_n
+        bcs @done
         ldy fish_kind,x
         lda fk_role,y
         cmp #ROLE_STILL
-        beq :+
-        lda #FC_BGANY
-        jsr charge_a
-        bcc @stop2
-        bra @nx
-:       lda #FC_BGSLOT
-        jsr charge_a
-        bcc @stop2
-        jsr try_list
-@nx:    inx
-        bra @slot
-@stop2: clc
-        rts
-@scan:  lda #FC_BGSCAN          ; looking at the first row, paid for now; each
-        ldx rd_nlist            ; row pays for looking at the next
-        beq :++
-        clc
-:       adc #FC_BGSCANPER
-        dex
-        bne :-
-:       sta bj_scan
-        jsr charge_a
-        bcc @stop2
-@row:   ldx bj_row
-        cpx bj_r1
-        bcc :+
-        stz bj_pend             ; finished
-        sec
-        rts
-:       stx FR_ROW
-        jsr scan_row
-        lda #FC_BGROW           ; this row: FC_BGROW, FC_BGWROW per Seaweed,
-        sta RD_T                ; FC_PATCH per block it must patch, and
-        stz RD_T+1              ; looking at the next
-        lda bj_scan
-        jsr add_t
-        ldx rd_nlist
-        beq @pat
-:       lda #FC_BGWROW
-        jsr add_t
-        dex
-        bne :-
-@pat:   lda rd_hold             ; Seaweed i through block i AND 1
-        sta RD_T+2
-        lda rd_hold+1
-        sta RD_T+3
-        ldx #0
-@pp:    cpx rd_nact
-        bcs @paid
-        txa
-        and #1
-        tay
-        lda rd_act,x
-        cmp RD_T+2,y
-        beq :+
-        sta RD_T+2,y
-        lda #FC_PATCH
-        jsr add_t
-:       inx
-        bra @pp
-@paid:  jsr charge
-        bcc @stop
-        jsr vbl_poll
-        lda bj_row              ; the floor's bytes, from aux
-        jsr bgrow
-        lda RD_T
-        sta RD_PS
-        sta RD_PD
-        clc
-        adc FR_C0
-        sta LDST
-        lda RD_T+1
-        sta RD_PS+1
-        sta RD_PD+1
-        adc #0
-        sta LDST+1
-        lda LDST
-        clc
-        adc #<(__FISHFLOOR_LOAD__ - FISH_BG)
-        sta LSRC
-        lda LDST+1
-        adc #>(__FISHFLOOR_LOAD__ - FISH_BG)
-        sta LSRC+1
-        ldy RD_WID
-        dey
-        jsr aux_copy
-        stz rd_i                ; then each Seaweed in the row, in slot order
-@weed:  ldy rd_i
-        cpy rd_nact
-        bcs @next
-        tya
-        and #1
-        tax
-        lda rd_act,y
-        tay
-        jsr hold
-        jsr empty_a
-        lda rd_i
-        and #1
-        tax
-        ldy RD_YA,x
-        txa
-        asl a
-        tax
-        lda #0
-        jsr @mask
-        ldy RD_LAST
-        jsr go_p1a              ; BG = BG AND NOT mask OR lit
-        inc rd_i
-        bra @weed
-@next:  inc bj_row
-        jmp @row
-@stop:  clc
-        rts
-@mask:  jmp (rd_entm,x)
-
-; fish_bg_floor: all of FISH_BG rebuilt by the background job, 8 bytes at a
-; time, with no budget (init, and after a change to the Seaweed set).
-fish_bg_floor:
-        lda #0
-@strip: sta FR_C0
-        clc
-        adc #8
-        sta FR_C1
-        lda #FLOOR_TOP
-        sta FR_R0
-        lda #192
-        sta FR_R1
+        bne @nx
+        jsr fish_box            ; (a Seaweed's box is at most 6 bytes wide)
+        bcc @nx
+        phx
         jsr fish_bg_begin
         lda #$FF
         sta FR_LEFT
         sta FR_LEFT+1
         jsr fish_bg_rows
-        lda FR_C1
-        cmp #40
-        bcc @strip
+        plx
+@nx:    inx
+        bra @slot
+@done:  rts
+.segment "FISHCODE2"
+
+; ================================================================ init
+; (in the overlay: run once, and never written)
+.segment "FX14"
+; fish_draw_init: the transparent and empty pages, the kernel bodies and
+; the pass kernels (four more of the three-layer floor body), every slot's
+; cache unbuilt and its box unknown, nothing pending.
+fish_draw_init:
+        ldx #0
+        lda #$7F
+:       sta FISH_TRANSP,x
+        stz FISH_ZERO,x
+        inx
+        bne :-
+        stz KT+1                ; the bodies, BODY_STEP apart
+        lda #>FISH_BODY
+        sta KT+2
+        ldx #0
+@body:  lda KT+1
+        pha
+        lda KT+2
+        pha
+        txa
+        jsr make_body
+        lda KT+1
+        sta k_endlo,x
+        lda KT+2
+        sta k_endhi,x
+        pla
+        sta KT+2
+        pla
+        clc
+        adc #<BODY_STEP
+        sta KT+1
+        bcc :+
+        inc KT+2
+:       inx
+        cpx #8
+        bne @body
+        lda #<FISH_PASS         ; the pass kernels: the three-layer floor body, four times
+        sta KT+1
+        lda #>FISH_PASS
+        sta KT+2
+        ldx #4
+@pass:  lda #7
+        jsr make_body
+        lda KT+1                ; (the end: on past the jump)
+        clc
+        adc #3
+        sta KT+1
+        bcc :+
+        inc KT+2
+:       dex
+        bne @pass
+        ldx #FISH_MAX-1
+:       stz sl_vis,x
+        stz sl_lit,x
+        stz sl_msk,x
+        dex
+        bpl :-
+        stz rd_pend
+        stz bj_pend
         rts
 
-; charge_a: charge (below) A units. Keeps X.
-charge_a:
-        sta RD_T
-        stz RD_T+1
-        jmp charge
-
-; add_t: RD_T (2 bytes) += A.
-add_t:  clc
-        adc RD_T
-        sta RD_T
-        bcc :+
+; make_aux_tables: in aux memory, FISH_REV (entry b: b's 7 dots in the
+; opposite order), FISH_SHT (page k, entry b: the dots that stay in a byte
+; shifted k, (b << k) & $7F; entry 128 + b: the dots that spill into the
+; next, b >> (7 - k)) and FISH_ISHT (the same, inverted, for masks).
+make_aux_tables:
+        sta WRCARDRAM
+        ldx #127
+@rev:   txa
+        ldy #7
+@bit:   lsr a
+        rol KT
+        dey
+        bne @bit
+        lda KT
+        and #$7F
+        sta FISH_REV,x
+        dex
+        bpl @rev
+        stz RD_T                ; page pointers: SHT (RD_T), ISHT (KT+2)
+        stz KT+2
+        ldy #127
+@b:     sty KT                  ; KT+1:KT = b << k
+        stz KT+1
+        lda #>FISH_SHT
+        sta RD_T+1
+        lda #>FISH_ISHT
+        sta KT+3
+        ldx #7
+@k:     lda KT
+        and #$7F
+        sta (RD_T),y            ; entry b: the dots that stay
+        eor #$7F
+        sta (KT+2),y
+        tya
+        eor #$80
+        tay
+        lda KT                  ; entry 128 + b: the dots that spill
+        asl a
+        lda KT+1
+        rol a
+        sta (RD_T),y
+        eor #$7F
+        sta (KT+2),y
+        tya
+        eor #$80
+        tay
+        asl KT
+        rol KT+1
         inc RD_T+1
+        inc KT+3
+        dex
+        bne @k
+        dey
+        bpl @b
+        sta WRMAINRAM
+        rts
+
+; MIROP ptr, op: op's operand = ptr, then ptr += 1.
+.macro MIROP ptr, op
+        lda ptr
+        sta op+1
+        lda ptr+1
+        sta op+2
+        inc ptr
+        bne :+
+        inc ptr+1
+:
+.endmacro
+
+; mirror_art: every swimmer's frames mirrored into aux at fk_m0/fk_m1: each
+; row's 5 bytes bit-reversed through FISH_REV and turned round (lc_mirror,
+; patched with the rows' addresses: a frame's lit rows, then its mask rows).
+; A kind narrower than 5 bytes mirrors as 5 wide: its drawing then sits
+; 35 - bw dots in, which fish_locate allows for.
+mirror_art:
+        ldx #FISH_NKIND-1
+@kind:  lda fk_role,x
+        cmp #ROLE_STILL
+        bcs @nxk
+        lda fk_f0lo,x
+        sta KT
+        lda fk_f0hi,x
+        sta KT+1
+        lda fk_m0lo,x
+        sta KT+2
+        lda fk_m0hi,x
+        sta KT+3
+        jsr @frame
+        lda fk_f1lo,x
+        sta KT
+        lda fk_f1hi,x
+        sta KT+1
+        lda fk_m1lo,x
+        sta KT+2
+        lda fk_m1hi,x
+        sta KT+3
+        jsr @frame
+@nxk:   dex
+        bpl @kind
+        rts
+@frame: ldy #1                  ; lit rows, then mask rows
+@part:  phy
+        MIROP KT, lcm_s4        ; the operands: src + 0..4 (read in that order
+        MIROP KT, lcm_s3        ; from byte 4), dst + 0..4
+        MIROP KT, lcm_s2
+        MIROP KT, lcm_s1
+        MIROP KT, lcm_s0
+        MIROP KT+2, lcm_d0
+        MIROP KT+2, lcm_d1
+        MIROP KT+2, lcm_d2
+        MIROP KT+2, lcm_d3
+        MIROP KT+2, lcm_d4
+        lda fk_rows,x
+        sta CNT
+        lda fk_r5,x             ; on to the mask rows: src + r5 - 5, dst + r5 - 5
+        sec
+        sbc #5
+        clc
+        adc KT
+        sta KT
+        bcc :+
+        inc KT+1
+:       lda fk_r5,x
+        sec
+        sbc #5
+        clc
+        adc KT+2
+        sta KT+2
+        bcc :+
+        inc KT+3
+:       phx
+        jsr lc_mirror
+        plx
+        ply
+        dey
+        bmi :+
+        jmp @part
 :       rts
+.segment "FISHCODE2"
+
+; ================================================================ language card
+; Code that reads aux memory: with RAMRD on, instructions in $0200-$BFFF
+; would come from aux too.
+.segment "FISHLC"
+
+; lc_build: CNT rows of a frame in aux (lcb_s*: the row's 5 bytes, Y = row
+; x 5) through a shift table page in aux (lcb_c*: the dots that stay,
+; lcb_t*: the dots that spill into the next byte) into a cache in main
+; memory, 6 bytes a row ((OUTP),y with OUTP a byte on each row): out[i] =
+; stay[src[i]] OP spill[src[i-1]], out[5] = spill[src[4]], OP ora from 0
+; for lit dots, and from $7F for masks through the inverted table.
+lc_build:
+        sta RDCARDRAM
+        ldy #0
+lcb_row:
+lcb_f:  lda #$00
+        .repeat 5, I
+.ident(.sprintf("lcb_s%d", I)): ldx $FFFF,y
+.ident(.sprintf("lcb_c%d", I)): ora $FF00,x
+        sta (OUTP),y
+.ident(.sprintf("lcb_t%d", I)): lda $FF80,x
+        iny
+        .endrepeat
+        sta (OUTP),y
+        inc OUTP                ; (a cache is page aligned: 216 bytes never wrap)
+        dec CNT
+        bne lcb_row
+        sta RDMAINRAM
+        rts
+
+; lc_mirror: CNT rows, from aux (lcm_s*: the row's bytes 4-0) to aux
+; (lcm_d*: bytes 0-4), each byte's dots turned round through FISH_REV.
+lc_mirror:
+        sta RDCARDRAM
+        sta WRCARDRAM
+        ldy #0
+lcm_row:
+        .repeat 5, I
+.ident(.sprintf("lcm_s%d", I)): ldx $FFFF,y
+        lda FISH_REV,x
+.ident(.sprintf("lcm_d%d", I)): sta $FFFF,y
+        .endrepeat
+        tya
+        clc
+        adc #5
+        tay
+        dec CNT
+        bne lcm_row
+        sta WRMAINRAM
+        sta RDMAINRAM
+        rts
 
 .segment "FX14"

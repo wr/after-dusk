@@ -1,16 +1,18 @@
 ; Effect 14: Fish! An aquarium: fish, a crab, seaweed, bubbles and jellyfish
 ; over a sea floor (the randomizer wipes first).
 ;
-; Its code, art and floor all live in FX2, behind the code. init copies the
-; art into page 2, which Fish! never shows, the code that doesn't fit the
-; overlay to page 2 (FISHCODE) and FXRAM (FISHCODE2), builds the tables the
-; drawing needs, places fish_count creatures anywhere in their bands, builds
-; FISH_BG from the floor (which stays in aux) and every Seaweed with the
-; background job, and draws it all on page 1. The row renderer
-; (fish_draw.inc) draws creatures from the state arrays; fish_spawn,
-; fish_hop and fish_weed move them, and queue changes to FISH_BG for the
-; background job (fish_bgq). The step (fish_step) runs every tick: each
-; creature hops on its own beat, every call paid for from one tick's budget.
+; Its code, art and floor all live in FX2, behind the code, and the art and
+; floor stay there, in aux memory. init copies the code that doesn't fit the
+; overlay to FXRAM (FISHCODE2) and the language card (FISHLC, the part that
+; reads aux), builds the shift and bit-reverse tables and a mirrored copy of
+; every swimmer's frames in aux, places fish_count creatures anywhere in
+; their bands, builds FISH_BG from the floor and every Seaweed with the
+; background job, and draws it all on page 1. The cache engine
+; (fish_draw.inc) keeps each creature's frame pre-shifted in page 2 and
+; composes rows from those caches; fish_spawn, fish_hop and fish_weed move
+; the creatures, and queue changes to FISH_BG for the background job
+; (fish_bgq). The step (fish_step) runs every tick: each creature hops on its
+; own beat, every call paid for from one tick's budget.
 
 .include "config.inc"
 
@@ -25,17 +27,17 @@ FISH_CYCLE = 30 * FISH_HOP      ; the step's load cycle in ticks: the beats
                                 ;   (3-6 at 2 dots, 6-12 at 4) all divide it
 
 .export fish_init, fish_step
-.export FISH_BG, FISH_CODE2, FISH_SHT, FISH_REV, FISH_IREV, FLOOR_TOP
+.export FISH_BG, FISH_CODE2, FISH_LC, FISH_SHT, FISH_ISHT, FISH_REV, FISH_CACHE, FLOOR_TOP
+.export FISH_TRANSP, FISH_ZERO, FISH_PASS, FISH_MIRA, FISH_MIRB, FISH_STRIDE
 .export FISH_HOP, FISH_CYCLE
 .export fish_n, fish_kind, fish_frame, fish_dir, fish_xl, fish_xh, fish_yl, fish_yh
-.export FISH_MAX, fish_box, fish_rect_begin, fish_rect_rows, fish_bg_begin, fish_bg_rows
-.export fish_bg_floor
+.export FISH_MAX, fish_box, fish_locate, fish_cache, fish_est
+.export fish_rect_begin, fish_rect_rows, fish_bg_begin, fish_bg_rows, fish_bg_floor
 .export FR_C0, FR_C1, FR_R0, FR_R1, FR_ROW, FR_LEFT, FR_ZP_END, FISH_RD_END
-.export FC_CALL, FC_EVENT, FC_EVPER, FC_SETUP, FC_PATCH, FC_SWITCH, FC_EMPTY
-.export FC_SEA_N, FC_SEA_M, FC_FLR_N, FC_FLR_M, FC_MIX, FC_MIXPER, FC_MIXNP
-.export FC_BEGIN, FC_BEGPER, FC_BEGFAR
-.export FC_BGBEGIN, FC_BGCALL, FC_BGSETUP, FC_BGANY, FC_BGSLOT, FC_BGROW, FC_BGWROW
-.export FC_BGSCAN, FC_BGSCANPER
+.export sl_vis, sl_lit, sl_msk, rd_pend, bj_pend
+.export FC_CALL, FC_EVENT, FC_EVPER, FC_SETUP, FC_PATCH, FC_PATCHCOL, FC_PASS, FC_ROWS, FC_PART, FC_BGCALL, FC_BGSETUP, FC_BGPER
+.export RC_BUILD, RC_BUILDFIX, RC_BGROW, RC_BGBYTE, RC_MPFIX, RC_MPPASS, RC_MPBYTE
+.export k_loop, k_byte, EST_FIXC, EST_SLOTC
 .export fish_count, fish_spawn, fish_hop, fish_weed, fish_rnd
 .export fish_beat, fish_lifel, fish_lifeh, fish_flip
 .export fish_bgq_push, fish_bgq_pop, fish_bgq_reset, FISH_BGQ_MAX
@@ -44,39 +46,34 @@ FISH_CYCLE = 30 * FISH_HOP      ; the step's load cycle in ticks: the beats
 .export fish_now, fish_now60, fish_duel, fish_dueh, fish_base60, fish_sbeat, fish_cost, fish_costh
 .export fish_w, fish_load, fish_pending, fish_late_max, fish_hops, fish_late, STEP_UNITS
 .export fish_bgq_peak, fish_bgq_over, fish_bg_busy, fish_bg_busy_max, fish_bgw, fish_bgr
-.export fish_newslot, st_lastw, st_nrow, FISH_ST_END, st_hop, st_weed, st_begin, st_worst, st_bg, renew, arrive
+.export fish_newslot, st_lastw, FISH_ST_END, st_hop, st_weed, st_begin, st_worst, st_bg, renew, arrive
 .export ST_NWEED, ST_BEGW, ST_BGMIN, ST_DONE, HOP_STAY, HOP_GONE, ARR_UNITS
-.export WEED_TICK, WEED_SWAY, WEED_GONE, ST_BEGIN, ST_BEGWEED, ST_BEGMISS, DRAW_MIN
+.export WEED_TICK, WEED_SWAY, WEED_GONE, ST_BEGIN, ST_BEGPER, DRAW_MIN
 
 .import aux_fetch, aux_copy, vbl_poll, row_lo, row_hi, xbyte_lo, xbyte_hi, xmod_lo, xmod_hi
 .import rng_next, rng_below
-.import __FISHART_LOAD__, __FISHART_RUN__, __FISHART_SIZE__
 .import __FISHFLOOR_LOAD__
-.import __FISHCODE_LOAD__, __FISHCODE_RUN__, __FISHCODE_SIZE__
 .import __FISHCODE2_LOAD__, __FISHCODE2_RUN__, __FISHCODE2_SIZE__
+.import __FISHLC_LOAD__, __FISHLC_RUN__, __FISHLC_SIZE__
 
 FLOOR_TOP   = 156               ; the floor is the bottom 36 rows
 FLOOR_BYTES = (192 - FLOOR_TOP) * 40
 
-; The memory map in config.inc, held to what the linker and the art need.
-.assert __FISHART_RUN__ = FISH_ART, lderror, "FISHRAM must start at FISH_ART"
-.assert __FISHCODE_RUN__ = FISH_CODE, lderror, "FISHCODEMEM must start at FISH_CODE"
+; The memory map in config.inc, held to what the linker needs: init copies
+; FISHCODE2 and FISHLC in whole pages, so neither may be empty, and FISHLC
+; must stop a page short of the vectors.
 .assert __FISHCODE2_RUN__ = FISH_CODE2, lderror, "FISHCODE2MEM must start at FISH_CODE2"
 .assert __FISHCODE2_SIZE__ > 0, lderror, "FISHCODE2 can't be empty: init copies whole pages of it"
-.assert __FISHART_RUN__ + __FISHART_SIZE__ <= FISH_BLKB, lderror, "the art runs into block B"
-.assert FISH_BG + FLOOR_BYTES <= FISH_REV, error, "FISH_BG runs into FISH_REV"
-.assert FISH_REV + 128 <= FISH_IREV, error, "FISH_REV runs into FISH_IREV"
-.assert FISH_IREV + 128 <= FISH_CODE2, error, "FISH_IREV runs into FISH_CODE2"
-.assert (FISH_REV & $7F) = 0 && (FISH_IREV & $7F) = 0, error, "REV and IREV must start on a half page"
-.assert FISH_CODE2 + $0600 <= FISH_SHT, error, "FISH_CODE2 runs into FISH_SHT"
-.assert FISH_SHT + 7 * 256 <= FISH_STATE, error, "FISH_SHT runs into FISH_STATE"
+.assert __FISHLC_RUN__ = FISH_LC, lderror, "FISHLCMEM must start at FISH_LC"
+.assert __FISHLC_SIZE__ > 0 && __FISHLC_SIZE__ <= $0800, lderror, "FISHLC must fit $F700-$FEFF: init copies whole pages"
+.assert FISH_BG + FLOOR_BYTES <= FISH_CODE2, error, "FISH_BG runs into FISH_CODE2"
+.assert FISH_CODE2 + $0E00 <= FISH_STATE, error, "FISH_CODE2 runs into FISH_STATE"
+.assert FISH_CACHE + 10 * 512 <= FISH_ZERO && FISH_TRANSP = FISH_ZERO + 256 && FISH_TRANSP + 256 <= FISH_PASS, error, "page 2's layout"
+.assert FISH_SHT + 7 * 256 <= FISH_ISHT && FISH_ISHT + 7 * 256 <= FISH_REV && FISH_REV + 128 <= FISH_MIRB, error, "aux's layout"
 
 ; ---- zero page ----
 SRC   = FXZ             ; 2
 DST   = FXZ+2           ; 2
-LO    = FXZ+4           ; a value being shifted, low and high
-HI    = FXZ+5
-K     = FXZ+6           ; shift, 0-6
 
 ; ---- creature state (FISH_STATE): slot i is entry i of each array ----
 fish_n     = FISH_STATE         ; slots in use
@@ -94,27 +91,7 @@ fish_yh    = FISH_STATE + 61
 
 ; ================================================================ init
 fish_init:
-        lda #<__FISHART_LOAD__  ; the art, from FX2 into page 2
-        sta LSRC
-        lda #>__FISHART_LOAD__
-        sta LSRC+1
-        lda #<__FISHART_RUN__
-        sta LDST
-        lda #>__FISHART_RUN__
-        sta LDST+1
-        ldx #>(__FISHART_SIZE__ + 255)  ; whole pages, never 0
-        jsr aux_fetch
-        lda #<__FISHCODE_LOAD__         ; the drawing code, after it
-        sta LSRC
-        lda #>__FISHCODE_LOAD__
-        sta LSRC+1
-        lda #<__FISHCODE_RUN__
-        sta LDST
-        lda #>__FISHCODE_RUN__
-        sta LDST+1
-        ldx #>(__FISHCODE_SIZE__ + 255)
-        jsr aux_fetch
-        lda #<__FISHCODE2_LOAD__        ; and more code, into FXRAM
+        lda #<__FISHCODE2_LOAD__        ; the drawing code, from FX2 into FXRAM
         sta LSRC
         lda #>__FISHCODE2_LOAD__
         sta LSRC+1
@@ -122,75 +99,26 @@ fish_init:
         sta LDST
         lda #>__FISHCODE2_RUN__
         sta LDST+1
-        ldx #>(__FISHCODE2_SIZE__ + 255)
+        ldx #>(__FISHCODE2_SIZE__ + 255)  ; whole pages, never 0
         jsr aux_fetch
-        jsr make_sht
-        jsr make_rev
+        lda #<__FISHLC_LOAD__           ; and the part that reads aux, into the language card
+        sta LSRC
+        lda #>__FISHLC_LOAD__
+        sta LSRC+1
+        lda #<__FISHLC_RUN__
+        sta LDST
+        lda #>__FISHLC_RUN__
+        sta LDST+1
+        ldx #>(__FISHLC_SIZE__ + 255)
+        jsr aux_fetch
+        jsr make_aux_tables     ; the shift and bit-reverse tables, in aux
+        jsr mirror_art          ; the swimmers' frames facing left, in aux
         stz fish_n              ; no creatures yet
         jsr fish_draw_init
         jsr st_reset            ; the step's clock and counters
         jmp fish_place          ; then the creatures
 
 ; ================================================================ set-up
-; make_sht: FISH_SHT page k holds, for a byte b of 7 dots shifted k dots
-; right on the screen (left in the byte), the dots that stay in this byte,
-; (b << k) & $7F, at entry b, and the dots that spill into the next byte,
-; b >> (7 - k), at entry 128 + b.
-make_sht:
-        stz DST
-        lda #>FISH_SHT
-        sta DST+1
-        stz K
-@page:  ldy #127
-@b:     sty LO                  ; HI:LO = b << k
-        stz HI
-        ldx K
-        beq @put
-@shl:   asl LO
-        rol HI
-        dex
-        bne @shl
-@put:   lda LO
-        and #$7F
-        sta (DST),y             ; entry b: the dots that stay
-        asl LO                  ; HI = (b << k) >> 7
-        rol HI
-        tya
-        ora #$80
-        tay
-        lda HI
-        sta (DST),y             ; entry 128 + b: the dots that spill
-        tya
-        and #$7F
-        tay
-        dey
-        bpl @b
-        inc DST+1
-        inc K
-        lda K
-        cmp #7
-        bne @page
-        rts
-
-; make_rev: FISH_REV entry b is b's 7 dots in the opposite order, for drawing
-; a creature facing left; FISH_IREV is the same with the dots inverted.
-make_rev:
-        ldx #127
-@b:     txa
-        ldy #7
-@bit:   lsr a                   ; b's dots from the left, each pushed in at
-        rol LO                  ; LO's left, so the first ends up rightmost
-        dey
-        bne @bit
-        lda LO
-        and #$7F
-        sta FISH_REV,x
-        eor #$7F
-        sta FISH_IREV,x
-        dex
-        bpl @b
-        rts
-
 ; bg_to_screen: draw FISH_BG on page 1, rows FLOOR_TOP-191.
 bg_to_screen:
         lda #<FISH_BG
@@ -272,8 +200,8 @@ mv_dxh:   .byte >FISH_HOP, >-FISH_HOP
 ; 4 rows above the floor. x anywhere:
 ; 0..280-w (Bubbles 4..280-w-4). A Seaweed also gets its life ((20 +
 ; rng_below(21)) * 60 ticks) and a sway count to start from (0-89); a
-; newcomer Seaweed queues its box for the background job. Keeps X; never
-; touches FR_C0..FR_R1.
+; newcomer Seaweed queues its box for the background job. Works out its
+; place (fish_locate). Keeps X; never touches FR_C0..FR_R1.
 fish_spawn:
         sta MV_MODE
         stx fish_newslot        ; (the step gives a newcomer its beat)
@@ -334,13 +262,13 @@ fish_spawn:
         sta fish_xl,x
         lda #>280
         sta fish_xh,x
-        rts
+        jmp fish_locate
 :       sec                     ; A = 0: x = -w
         sbc MV_W
         sta fish_xl,x
         lda #$FF
         sta fish_xh,x
-        rts
+        jmp fish_locate
 @x:     lda #<281               ; x = rnd(281 - w), Bubbles 4 + rnd(273 - w)
         cpy #ROLE_RISE
         bcc :+
@@ -385,9 +313,9 @@ fish_spawn:
         sta fish_flip,x
         lda MV_MODE
         bne @rts
-        jsr box_of              ; a newcomer: its box to the queue
+        jsr box_of              ; a newcomer: its place, and its box to the queue
         jmp bgq_push_bx
-@rts:   rts
+@rts:   jmp fish_locate         ; its place (Y = kind after)
 
 ; fish_rnd: MV_V = 0..MV_N-1 (MV_N 1-511), every value alike: rng_below
 ; when MV_N fits a byte; otherwise a ninth bit (rng_below(2)) over a byte
@@ -413,7 +341,9 @@ fish_rnd:
 
 ; fish_hop: X = slot (never a Seaweed: Task 5's picker skips them). One hop:
 ; its frames swap; a Bubble rises FISH_HOP rows; the rest turn round 1 time in
-; 42 (rng_below(42) = 0), then move FISH_HOP dots the way they face. One that
+; 42 (rng_below(42) = 0), then move FISH_HOP dots the way they face, and its
+; place is worked out again (fish_locate: its cache is rebuilt when its rect
+; is drawn). One that
 ; has gone (a swimmer once x < -w-FISH_HOP or x > 280+FISH_HOP, a Bubble once
 ; y < -h) is replaced by a newcomer (fish_spawn, A = 0). Leaves the rect to
 ; redraw in FR_C0..FR_R1 and carry set, or carry clear if none of it shows:
@@ -478,7 +408,8 @@ fish_hop:
         lda fish_xh,x
         sbc #>(281 + FISH_HOP)
         bcs @gone
-@new:   jsr fish_box            ; the new box
+@new:   jsr fish_locate         ; its new place, and its box
+        jsr fish_box
         bcc @old
         bit MV_OV
         bpl @yes                ; the old one didn't show: the new box alone
@@ -509,7 +440,7 @@ fish_hop:
         beq @old                ; a Seaweed has queued its own box
         bit MV_OV
         bpl @yes                ; the rect is the newcomer's
-        jsr bgq_push_bx         ; both show: the newcomer's waits in the queue
+        jsr fish_bgq_push       ; both show: the newcomer's waits in the queue
 @old:   bit MV_OV               ; the old box, if it showed
         bpl @no
         ldy #3
@@ -528,7 +459,8 @@ fish_hop:
 ; box too. Otherwise counts its sway: every 90 ticks its frames swap and
 ; its box goes on the queue. It leaves no rect (each queued job redraws the
 ; screen after rebuilding FISH_BG), never touches FR_C0..FR_R1 or another
-; slot, so it may run while a creature rect is pending. Keeps X.
+; slot, so it may run while a creature rect is pending. A sway works its
+; place out again (box_of), so its cache is rebuilt for the new frame. Keeps X.
 fish_weed:
         lda fish_lifel,x
         bne :+
@@ -756,8 +688,7 @@ ST_CLEAR_END = fish_bgw + 1             ;   2 its redraw
 fish_bgr    = ST_CLEAR_END      ; 4: its rect (FR_C0..FR_R1; R0: the redraw's next row)
 fish_newslot = fish_bgr + 4     ; the slot fish_spawn last filled
 st_lastw    = fish_newslot + 1  ; ST_NWEED when ST_BEGW was last worked out
-st_nrow     = st_lastw + 1      ; slots fish_rect_begin looked at whose rows touch
-FISH_ST_END = st_nrow + 1
+FISH_ST_END = st_lastw + 1
 .assert FISH_ST_END <= FISH_STATE + $400, error, "the step's state runs past FISH_STATE"
 
 ; ---- zero page, after the motion's ----
@@ -780,8 +711,8 @@ ST_P     = FISH_ZP_END + 17     ;   and the p being tried
 
 ; ---- costs, units of 16 cycles (measured worst cycles in brackets) ----
 STEP_UNITS = 920                ; the tick's budget
-HOP_STAY   = 110                ; fish_hop, staying (1,720: facing left, clipped at the right)
-HOP_GONE   = 245                ;   gone and replaced (3,850)
+HOP_STAY   = 110                ; fish_hop, staying (fish_box, the move, fish_locate)
+HOP_GONE   = 245                ;   gone and replaced
 ARR_UNITS  = 340 + 13 * (FISH_CYCLE - 60) / 6
                                 ; renew: leaving and arriving (5,072; about
                                 ;   5,200 at worst: beat 3 in and out, a Bubble's
@@ -793,18 +724,18 @@ ARR_UNITS  = 340 + 13 * (FISH_CYCLE - 60) / 6
 WEED_TICK  = 3                  ; fish_weed, a plain tick (39)
 WEED_SWAY  = 76                 ;   a sway (1,162)
 WEED_GONE  = 235                ;   gone and replaced (3,531)
-ST_BEGIN   = FC_BEGIN + 10      ; st_begin: fish_rect_begin (155), its own sums
-                                ;   (about 125) and a IIc's slower vbl_poll;
-ST_BEGWEED = 2                  ;   per Seaweed slot (23),
-ST_BEGMISS = 27 + 2             ;   per other slot whose rows touch (415 + 22),
-ST_BEGFAR  = FC_BEGFAR + 2      ;   per other slot whose rows miss (152 + 22)
-DRAW_MIN   = FC_CALL + FC_EVENT + 2 * FC_EVPER + FC_SETUP + FC_PATCH + FC_FLR_M
+ST_BEGIN   = 11                 ; st_begin: fish_rect_begin (its poll and set-up), its
+                                ;   own charge, and a IIc's slower vbl_poll (about 130)
+ST_BEGPER  = 8                  ;   per slot in use (listed: about 125; passed over: 30-45)
+DRAW_MIN   = FC_CALL + FC_EVENT + 2 * FC_EVPER + FC_SETUP + FC_PATCH + 4 * FC_PATCHCOL + FC_ROWS + 20
                                 ; a first row at its dearest (a redraw waits for it)
-EST_FIX    = HOP_STAY + ST_BEGIN + FC_BEGPER + FC_CALL + FC_EVENT + FC_EVPER + FC_SETUP + FC_PATCH
-BG_FIX     = FC_BGCALL + FC_BGSETUP + FC_BGSCAN + FC_BGROW + 2 * FC_PATCH
-BG_WEED    = FC_BGSLOT + FC_BGSCANPER + FC_BGWROW
-LEFT_MIN   = BG_FIX             ; with less left, nothing more can start
-.assert LEFT_MIN <= HOP_STAY + ST_BEGIN + FC_BEGPER, error, "LEFT_MIN: a hop needs less"
+BG_FIX     = FC_BGCALL + FC_BGSETUP + FC_EVENT + FC_SETUP + FC_ROWS + 25
+                                ; a useful background call: a row's floor bytes
+BG_WEED    = FC_BGPER + FC_EVPER + FC_PATCH + 4 * FC_PATCHCOL + 12
+                                ;   and per Seaweed its layer in the row
+LEFT_MIN   = 120                ; with less left, nothing more can start (a background
+                                ;   call with less than BG_FIX pays its call and does nothing)
+.assert LEFT_MIN <= HOP_STAY + ST_BEGIN + ST_BEGPER, error, "LEFT_MIN: a hop needs less"
 
 fish_step:
         inc fish_now            ; 1. the clock
@@ -1217,9 +1148,9 @@ st_reset:
         stx st_lastw            ; on the first step
         rts
 
-; st_worst: when the Seaweed count changes, ST_BEGW (a begin at its worst:
-; ST_BEGIN, ST_BEGWEED per Seaweed slot, FC_BEGPER per other) and ST_BGMIN
-; (a useful background call: the call, listing the Seaweed, a row).
+; st_worst: when the Seaweed count changes, ST_BEGW (a begin: ST_BEGIN and
+; ST_BEGPER per slot) and ST_BGMIN (a useful background call: the call,
+; listing the slots, a row with every Seaweed in it).
 st_worst:
         lda ST_NWEED
         cmp st_lastw
@@ -1247,8 +1178,8 @@ st_worst:
         bpl @sum
 @rts:   rts
 w_base:  .byte ST_BEGIN, 0, BG_FIX
-w_weed:  .byte ST_BEGWEED, 0, BG_WEED
-w_other: .byte FC_BEGPER, 0, FC_BGANY
+w_weed:  .byte ST_BEGPER, 0, BG_WEED
+w_other: .byte ST_BEGPER, 0, FC_BGPER
 
 ; madd: RD_T (2 bytes) += A * X. Keeps Y.
 madd:   cpx #0
@@ -1261,93 +1192,17 @@ madd:   cpx #0
 @rts:   rts
 
 ; st_begin: fish_rect_begin over FR_C0..FR_R1, paid for after (FR_LEFT
-; holds ST_BEGW): ST_BEGW, less FC_BEGPER - ST_BEGFAR for each slot (not
-; Seaweed) whose rows miss, and FC_BEGPER - ST_BEGMISS for each whose rows
-; touch but that it didn't list.
+; holds ST_BEGW): ST_BEGW.
 st_begin:
         jsr fish_rect_begin
         lda ST_BEGW
-        sta RD_T
-        lda ST_BEGW+1
-        sta RD_T+1
-        lda fish_n
-        sec
-        sbc ST_NWEED
-        sec
-        sbc st_nrow
-        tax
-        lda #FC_BEGPER - ST_BEGFAR
-        jsr msub
-        lda st_nrow
-        sec
-        sbc rd_nlist
-        tax
-        lda #FC_BEGPER - ST_BEGMISS
-        jsr msub
-        jmp charge
-
-; msub: RD_T (2 bytes) -= A * X.
-msub:   cpx #0
-        beq @rts
-        sta ST_M
-:       lda RD_T
-        sec
-        sbc ST_M
-        sta RD_T
-        bcs :+
-        dec RD_T+1
-:       dex
-        bne :--
-@rts:   rts
+        ldy ST_BEGW+1
+        jmp charge_ay
 
 ; cost_of: X = slot. Its hop's estimate in units (fish_cost, fish_costh):
-; EST_FIX, FC_BEGFAR for each other slot, and its box's rows at a row's
-; cost facing left at sea or over the floor, from its y (Bubbles: all at
-; sea, 2 more for the rise). fish_w = the estimate / 64, rounded. Keeps X.
+; fish_est's. fish_w = the estimate / 64, rounded. Keeps X.
 cost_of:
-        phx
-        ldy fish_kind,x
-        lda fish_yl,x           ; its box's top row (but for Bubbles)
-        clc
-        adc fk_by,y
-        sta ST_T
-        lda #<EST_FIX
-        sta RD_T
-        lda #>EST_FIX
-        sta RD_T+1
-        ldx fish_n              ; the other slots
-        dex
-        lda #FC_BEGFAR
-        jsr madd
-        ldx fk_rows,y
-        lda fk_role,y
-        cmp #ROLE_RISE
-        bne @swim
-        inx                     ; a Bubble
-        inx
-        lda #FC_SEA_N
-        jsr madd
-        bra @w
-@swim:  lda #FLOOR_TOP          ; rows at sea: FLOOR_TOP - top, 0..rows
-        sec
-        sbc ST_T
-        bcs :+
-        lda #0
-:       cmp fk_rows,y
-        bcc :+
-        lda fk_rows,y
-:       sta ST_T
-        txa                     ; and over the floor
-        sec
-        sbc ST_T
-        pha
-        ldx ST_T
-        lda #FC_SEA_M
-        jsr madd
-        plx
-        lda #FC_FLR_M
-        jsr madd
-@w:     plx
+        jsr fish_est
         lda RD_T
         sta fish_cost,x
         clc
