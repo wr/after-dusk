@@ -14,6 +14,9 @@ shift k = X % 7, and output byte i = (src[i] << k) & $7F | src[i-1] >> (7-k).
 Every row starts from FISH_BG (rows 156-191) or black, then every slot that
 isn't Seaweed, in slot order: screen = (screen AND NOT mask) OR lit. FISH_BG is
 the floor with every Seaweed composed onto it the same way, in slot order.
+
+Motion (Global Constraints): Rng is the core's random numbers, so a test can
+tell which hop turns; band() is where a spawn may land; hop() is one hop.
 """
 import json
 from functools import lru_cache
@@ -122,3 +125,73 @@ def expected_page(s):
 def fish_bg(s):
     a = s.addr("FISH_BG")
     return bytes(s.mem.ram[a:a + FLOOR_ROWS * 40])
+
+
+# ---------------------------------------------------------------- motion
+# How each creature moves, by the Global Constraints (the approved sample).
+
+ROLE_SWIM, ROLE_TOP, ROLE_FLOOR, ROLE_LOW, ROLE_RISE = 0, 1, 2, 3, 5
+HOP = 2                         # dots a swimmer moves, rows a Bubble rises
+
+
+class Rng:
+    """The core's random numbers (src/rng.s): a 16-bit xorshift (7, 9, 8),
+    and rng_below's draws under the next power of two, rejecting n or more."""
+
+    def __init__(self, state):
+        self.lo, self.hi = state & 0xFF, state >> 8
+
+    def next(self):
+        lo, hi = self.lo, self.hi
+        a = (hi & 1) << 7 | lo >> 1             # lsr hi; ror lo
+        carry = lo & 1
+        hi = a ^ hi
+        a = carry << 7 | hi >> 1                # ror
+        lo = a ^ lo
+        hi = lo ^ hi
+        self.lo, self.hi = lo, hi
+        return lo
+
+    def below(self, n):
+        mask = (1 << (n - 1).bit_length()) - 1
+        while True:
+            v = self.next() & mask
+            if v < n:
+                return v
+
+
+def band(kind, anywhere):
+    """(ys, xs): where a creature fish_spawn places may have its cell's
+    top-left. A newcomer swimmer's xs are its two entries (x = -w heading
+    right, 280 heading left)."""
+    k = load_art()["kinds"][kind]
+    w, h, role = k["cw"], k["ch"], k["role"]
+    ys = {ROLE_SWIM: range(2, 182 - h + 1),
+          ROLE_TOP: range(0, 31),
+          ROLE_FLOOR: range(192 - h - 4, 192 - h),
+          ROLE_LOW: range(156 - h + 4, 156 - h + 13),
+          ROLE_STILL: range(192 - h, 192 - h + 1),
+          ROLE_RISE: range(0, 157) if anywhere else range(152, 153)}[role]
+    if role == ROLE_RISE:
+        xs = range(4, 280 - w - 4 + 1)
+    elif role == ROLE_STILL or anywhere:
+        xs = range(0, 280 - w + 1)
+    else:
+        xs = (-w, 280)
+    return ys, xs
+
+
+def hop(c, turn):
+    """(new, gone): creature c (not Seaweed) after one hop, and whether that
+    takes it off for good (it is then replaced by a newcomer). A Bubble rises
+    HOP rows; the rest turn round if `turn`, then move HOP dots the way they
+    face. Frames swap every hop."""
+    k = load_art()["kinds"][c["kind"]]
+    c = dict(c, frame=c["frame"] ^ 1)
+    if k["role"] == ROLE_RISE:
+        c["y"] -= HOP
+        return c, c["y"] < -k["ch"]
+    if turn:
+        c["dir"] ^= 1
+    c["x"] += -HOP if c["dir"] else HOP
+    return c, c["x"] < -k["cw"] - 2 or c["x"] > 282

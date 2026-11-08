@@ -1,7 +1,11 @@
 """Fish! (effect 14), so far: init copies its art and floor out of FX2 into
-place, builds its shift and bit-reverse tables, and draws the sea floor."""
+place, builds its shift and bit-reverse tables, places its creatures and
+draws them over the sea floor; the row renderer; and how each creature
+moves (spawning, hopping, turning, leaving, Seaweed and Bubbles) with the
+queue of background jobs."""
 import json
 import random
+from collections import Counter
 from functools import reduce
 
 import pytest
@@ -38,9 +42,15 @@ def mem(s, name, n):
     return bytes(s.mem.ram[a:a + n])
 
 
+def empty_sea(s):
+    """junk, and no creatures: init draws the floor alone."""
+    junk(s)
+    s.poke(s.addr("fish_count"), 0)
+
+
 @pytest.fixture(scope="module")
 def s(built):
-    return start(FX, prepare=junk)
+    return start(FX, prepare=empty_sea)
 
 
 def test_init_copies_art_and_floor(s):
@@ -145,7 +155,7 @@ HOP_LIMIT = 15_500              # one creature's hop must leave the rest of the 
 @pytest.fixture(scope="module")
 def r(built):
     """Fish! after init, with a snapshot of its empty sea to go back to."""
-    s = start(FX, prepare=junk)
+    s = start(FX, prepare=empty_sea)
     s.empty = (s.page_bytes(PAGE1), fishref.fish_bg(s))
     return s
 
@@ -735,3 +745,616 @@ def test_each_background_row_costs_no_more_than_it_charges(r):
                 costs.append((cycles, 0xFFFF - r.peek16(r.addr("FR_LEFT"))))
             cyc, units = costs[1][0] - costs[0][0], costs[1][1] - costs[0][1]
             assert cyc <= 16 * units, (specs, cyc, units)
+
+
+# ---------------------------------------------------------------- how each creature moves
+# State is read straight from the simulator; positions are the cell's top-left.
+
+SEAWEED, BUBBLES, CRAB = 10, 11, 5
+BGQ = ("fish_bgq_c0", "fish_bgq_c1", "fish_bgq_r0", "fish_bgq_r1")
+BGQ_MAX = 20
+STRIPS = [(c, c + 8, 156, 192) for c in range(0, 40, 8)]
+
+
+def role(kind):
+    return kind_of(kind)["role"]
+
+
+def slot(s, i):
+    """Creature i, with its beat and, for Seaweed, its life and sway count."""
+    c = fishref.creatures(s)[i]
+    c["beat"] = s.peek(s.addr("fish_beat") + i)
+    c["flip"] = s.peek(s.addr("fish_flip") + i)
+    c["life"] = s.peek(s.addr("fish_lifel") + i) | s.peek(s.addr("fish_lifeh") + i) << 8
+    return c
+
+
+def pos(c):
+    return {k: c[k] for k in ("kind", "frame", "dir", "x", "y")}
+
+
+def spawn(s, i, anywhere):
+    cycles = s.call("fish_spawn", x=i, a=1 if anywhere else 0)
+    return slot(s, i), cycles
+
+
+def set_life(s, i, life, flip=None):
+    s.poke(s.addr("fish_lifel") + i, life)
+    s.poke(s.addr("fish_lifeh") + i, life >> 8)
+    if flip is not None:
+        s.poke(s.addr("fish_flip") + i, flip)
+
+
+def queue(s):
+    """The queued rects, oldest first."""
+    n, h = s.peek(s.addr("fish_bgq_n")), s.peek(s.addr("fish_bgq_h"))
+    return [tuple(s.peek(s.addr(f) + (h + j) % BGQ_MAX) for f in BGQ) for j in range(n)]
+
+
+def push(s, rect):
+    set_rect(s, rect)
+    s.call("fish_bgq_push")
+
+
+def pop(s):
+    s.call("fish_bgq_pop")
+    return tuple(s.peek(s.addr(n)) for n in FR) if s.carry() else None
+
+
+def drain(s):
+    """Every queued job as Task 5 will run it, with no budget: FISH_BG rebuilt
+    in the rect, then the screen redrawn there."""
+    while (rect := pop(s)) is not None:
+        rebuild_bg(s, rect)
+        assert redraw(s, rect)[1]
+
+
+def rng_for(turn, start=1):
+    """The first RNG state from `start` whose next rng_below(42) turns a
+    swimmer round, or doesn't."""
+    st = (start - 1) % 0xFFFF + 1               # never 0
+    while (fishref.Rng(st).below(42) == 0) != turn:
+        st = st % 0xFFFF + 1
+    return st
+
+
+def hop(s, i):
+    """fish_hop on slot i: (rect or None, cycles)."""
+    cycles = s.call("fish_hop", x=i)
+    return (tuple(s.peek(s.addr(n)) for n in FR) if s.carry() else None), cycles
+
+
+def hop_rect(old, new, gone):
+    """(rect, queued): what fish_hop leaves to redraw for a hop from old to
+    new, and the rects it queues. A Seaweed newcomer queues its own box; one
+    that has gone leaves its old box when that still shows, or the
+    newcomer's, and queues the newcomer's when both show."""
+    ob = expected_box(old)
+    nb = None if role(new["kind"]) == ROLE_STILL else expected_box(new)
+    queued = [expected_box(new)] if role(new["kind"]) == ROLE_STILL else []
+    if not gone:
+        boxes = [b for b in (ob, nb) if b]
+        return (reduce(union, boxes) if boxes else None), []
+    if ob and nb:
+        return ob, queued + [nb]
+    return ob or nb, queued
+
+
+def is_newcomer(c):
+    ys, xs = fishref.band(c["kind"], False)
+    return c["y"] in ys and c["x"] in xs
+
+
+@pytest.fixture(scope="module")
+def spawns(r):
+    """20,000 spawns into slot 0, half placed anywhere and half newcomers:
+    (anywhere, creature, cycles)."""
+    clear(r)
+    r.call("fish_bgq_reset")
+    r.poke(r.addr("fish_n"), 1)
+    out = []
+    for i in range(20_000):
+        anywhere = i % 2 == 0
+        out.append((anywhere, *spawn(r, 0, anywhere)))
+    r.call("fish_bgq_reset")
+    clear(r)
+    return out
+
+
+def test_rng_model_is_the_cores(r):
+    """fishref.Rng, which the tests below predict turns with, draws as the
+    core does."""
+    for n in (1, 2, 4, 14, 42, 90, 157, 255):
+        st = 0x1234 + n
+        r.poke16(RNG, st)
+        model = fishref.Rng(st)
+        for _ in range(50):
+            r.call("rng_below", a=n)
+            assert r.mpu.a == model.below(n), n
+        assert r.peek16(RNG) == model.lo | model.hi << 8
+
+
+def test_wide_random_reaches_every_value(r):
+    """fish_rnd draws 0..N-1 for N up to 511 (a Bubble's x has 260 values):
+    every value comes up, none outside."""
+    for n in (246, 260, 263):
+        r.poke16(r.addr("MV_N"), n)
+        seen = Counter()
+        for _ in range(20 * n):
+            r.call("fish_rnd")
+            seen[r.peek16(r.addr("MV_V"))] += 1
+        assert sorted(seen) == list(range(n)), n
+        assert max(seen.values()) < 3 * 20, n
+
+
+def test_bands(spawns):
+    """Every spawn in its band, anywhere and newcomer; the swimming bands'
+    top and bottom rows are reached; still and rising kinds never face left."""
+    ends = {}
+    rise_ys = []
+    for anywhere, c, _ in spawns:
+        k = kind_of(c["kind"])
+        ys, xs = fishref.band(c["kind"], anywhere)
+        assert c["y"] in ys and c["x"] in xs, (anywhere, c)
+        assert c["frame"] in (0, 1) and c["dir"] in (0, 1), c
+        if k["role"] >= ROLE_STILL:
+            assert c["dir"] == 0, c
+        if k["role"] < ROLE_STILL:
+            lo, hi = ends.get(k["role"], (999, 999))
+            ends[k["role"]] = (min(lo, c["y"] - ys[0]), min(hi, ys[-1] - c["y"]))
+        elif k["role"] == ROLE_RISE and anywhere:
+            rise_ys.append(c["y"])
+    assert ends == {r_: (0, 0) for r_ in range(4)}, ends
+    assert min(rise_ys) <= 4 and max(rise_ys) >= 152
+
+
+def test_bubble_x_covers_its_range(r):
+    """Review Focus 1: a Bubble's x runs 4-263, wider than a byte: both ends
+    and the right-hand 24 dots are reached, and nothing falls outside."""
+    clear(r)
+    r.call("fish_bgq_reset")
+    r.poke(r.addr("fish_n"), 1)
+    xs = []
+    for i in range(60_000):
+        c, _ = spawn(r, 0, i % 2 == 0)
+        if c["kind"] == BUBBLES:
+            xs.append(c["x"])
+            if len(xs) >= 1000 and min(xs) == 4 and max(xs) == 263:
+                break
+    r.call("fish_bgq_reset")
+    clear(r)
+    assert min(xs) == 4 and max(xs) == 263, (min(xs), max(xs), len(xs))
+    assert all(4 <= x <= 263 for x in xs)
+    assert sum(x >= 256 for x in xs) > len(xs) / 260 * 8 * 0.5
+
+
+def test_kinds_and_beats_are_even(spawns):
+    n = len(spawns)
+    kinds = Counter(c["kind"] for _, c, _ in spawns)
+    for k in range(14):
+        assert abs(kinds[k] / n - 1 / 14) <= 0.015, (k, kinds[k])
+    beats = Counter(c["beat"] for _, c, _ in spawns if c["kind"] != BUBBLES)
+    m = sum(beats.values())
+    assert set(beats) == {4, 5, 6}
+    for beat, share in ((4, 0.5), (5, 0.25), (6, 0.25)):
+        assert abs(beats[beat] / m - share) <= 0.03, beats
+    assert {c["beat"] for _, c, _ in spawns if c["kind"] == BUBBLES} == {3}
+
+
+def test_hop_moves_two_dots_and_swaps_frames(r):
+    """x += 2 * (1 - 2 * dir) after any turn, frame ^= 1, y unchanged; the
+    turn is rng_below(42) = 0; the rect is the old box joined with the new."""
+    rnd = random.Random(61)
+    swimmers = [k for k in range(14) if role(k) < ROLE_STILL]
+    turns = 0
+    for trial in range(3000):
+        kind = rnd.choice(swimmers)
+        ys, _ = fishref.band(kind, True)
+        old = dict(kind=kind, frame=rnd.randrange(2), dir=rnd.randrange(2),
+                   x=rnd.randrange(-30, 290), y=rnd.choice(ys))
+        if fishref.hop(old, False)[1] or fishref.hop(old, True)[1]:
+            continue
+        clear(r)
+        place(r, [tuple(old.values())])
+        model = fishref.Rng(r.peek16(RNG))
+        turn = model.below(42) == 0
+        turns += turn
+        rect, _ = hop(r, 0)
+        new = fishref.creatures(r)[0]
+        nd = old["dir"] ^ turn
+        assert new == dict(old, frame=old["frame"] ^ 1, dir=nd, x=old["x"] + 2 * (1 - 2 * nd)), old
+        assert r.peek16(RNG) == model.lo | model.hi << 8
+        assert rect == hop_rect(old, new, False)[0], (old, new)
+        if rect:
+            assert rect[1] - rect[0] <= 8
+    assert turns > 20
+
+
+def test_turns_about_one_in_42(r):
+    """50,000 hops: a turn 1 time in 42 (+- 10%), each on the hop the model
+    says; Seaweed and Bubbles never turn."""
+    rnd = random.Random(42)
+    swimmers = [k for k in range(14) if role(k) < ROLE_STILL]
+    clear(r)
+    turns = hops = 0
+    c = None
+    for i in range(50_000):
+        if c is None or not 20 <= c["x"] <= 240:
+            kind = rnd.choice(swimmers)
+            place(r, [(kind, rnd.randrange(2), rnd.randrange(2), 130, rnd.choice(fishref.band(kind, True)[0]))])
+            c = fishref.creatures(r)[0]
+        turn = fishref.Rng(r.peek16(RNG)).below(42) == 0
+        r.call("fish_hop", x=0)
+        n = fishref.creatures(r)[0]
+        assert (n["dir"] != c["dir"]) == turn
+        turns += turn
+        hops += 1
+        c = n
+    assert abs(turns / hops - 1 / 42) <= 0.1 / 42, (turns, hops)
+    clear(r)
+    place(r, [(BUBBLES, 0, 0, 100, 150)])
+    for _ in range(70):
+        r.call("fish_hop", x=0)
+        assert fishref.creatures(r)[0]["dir"] == 0
+    place(r, [(SEAWEED, 0, 0, 100, 156)])
+    set_life(r, 0, 3000)
+    r.call("fish_bgq_reset")
+    for _ in range(500):
+        r.call("fish_weed", x=0)
+        assert pos(fishref.creatures(r)[0]) | {"frame": 0} == dict(kind=SEAWEED, frame=0, dir=0, x=100, y=156)
+    r.call("fish_bgq_reset")
+
+
+def test_newcomers_enter_facing_inward(spawns):
+    sides = Counter()
+    for anywhere, c, _ in spawns:
+        if anywhere or role(c["kind"]) >= ROLE_STILL:
+            continue
+        w = kind_of(c["kind"])["cw"]
+        assert (c["x"], c["dir"]) in ((-w, 0), (280, 1)), c
+        sides[c["dir"]] += 1
+    assert abs(sides[0] / sum(sides.values()) - 0.5) <= 0.03, sides
+
+
+def test_leaving_and_replacing(r):
+    """Swimmers go once x < -w-2 or x > 282, Bubbles once y < -h, turning or
+    not, and a newcomer takes the slot; the rect and the queue are as
+    hop_rect says (a Bubble's last row can still show when it goes)."""
+    seen = Counter()
+    for kind in range(14):
+        k = kind_of(kind)
+        if k["role"] == ROLE_STILL:
+            continue
+        if k["role"] == ROLE_RISE:
+            starts = [(0, x, y) for x in (4, 130, 263) for y in range(-k["ch"] - 2, -k["ch"] + 5)]
+        else:
+            y = fishref.band(kind, True)[0][0]
+            starts = [(d, x, y) for d in (0, 1)
+                      for x in list(range(-k["cw"] - 6, -k["cw"] + 3)) + list(range(276, 287))]
+        for d, x, y in starts:
+            for turn in (False, True):
+                for frame in (0, 1):
+                    clear(r)
+                    r.call("fish_bgq_reset")
+                    place(r, [(kind, frame, d, x, y)])
+                    old = fishref.creatures(r)[0]
+                    r.poke16(RNG, rng_for(turn, 1 + 97 * seen["hops"]))
+                    seen["hops"] += 1
+                    want, gone = fishref.hop(old, turn and k["role"] != ROLE_RISE)
+                    rect, _ = hop(r, 0)
+                    new = fishref.creatures(r)[0]
+                    if gone:
+                        assert is_newcomer(new), (old, new)
+                        seen["gone"] += 1
+                        seen["old box shows"] += expected_box(old) is not None
+                    else:
+                        assert new == want, (old, turn)
+                    want_rect, want_q = hop_rect(old, new, gone)
+                    assert rect == want_rect, (old, new, gone)
+                    assert queue(r) == want_q, (old, new, gone)
+    r.call("fish_bgq_reset")
+    assert seen["gone"] > 100 and seen["old box shows"] > 2, seen
+
+
+def test_bubbles_rise_two_rows(r):
+    """y -= 2 a hop, frames swap, x stays, never mirrored, no random draw."""
+    for frame in (0, 1):
+        for x in (4, 100, 263):
+            clear(r)
+            place(r, [(BUBBLES, frame, 0, x, 152)])
+            for i in range(1, 40):
+                old = fishref.creatures(r)[0]
+                rng = r.peek16(RNG)
+                rect, _ = hop(r, 0)
+                new = fishref.creatures(r)[0]
+                assert new == dict(old, y=152 - 2 * i, frame=frame ^ (i & 1)), (x, i)
+                assert r.peek16(RNG) == rng
+                assert rect == hop_rect(old, new, False)[0]
+                assert not fishref.mirrored(new)
+
+
+def test_seaweed_life_and_sway(r, spawns):
+    """Life 1200-2400 ticks, a multiple of 60, every one possible; the sway
+    count starts anywhere in 0-89; frames swap every 90 ticks, each swap
+    queuing its box; when its life runs out its old box is queued, then a
+    newcomer's that shows."""
+    weeds = [c for _, c, _ in spawns if c["kind"] == SEAWEED]
+    assert {c["life"] for c in weeds} == set(range(1200, 2401, 60))
+    assert {c["flip"] for c in weeds} == set(range(90))
+    clear(r)
+    r.call("fish_bgq_reset")
+    place(r, [(0, 0, 0, 40, 40), (SEAWEED, 0, 0, 100, 156)])
+    set_life(r, 1, 1000, flip=37)
+    b = expected_box(fishref.creatures(r)[1])
+    swaps = []
+    for t in range(1, 400):
+        before = pos(fishref.creatures(r)[1])
+        r.call("fish_weed", x=1)
+        after = pos(fishref.creatures(r)[1])
+        if after["frame"] != before["frame"]:
+            swaps.append(t)
+            assert queue(r) == [b]
+            r.call("fish_bgq_reset")
+        assert after | {"frame": 0} == before | {"frame": 0}
+        assert queue(r) == []
+    assert swaps == [53, 143, 233, 323]
+    assert slot(r, 1)["life"] == 1000 - 399
+    assert pos(fishref.creatures(r)[0]) == dict(kind=0, frame=0, dir=0, x=40, y=40)
+    kinds = Counter()
+    for trial in range(300):
+        place(r, [(0, 0, 0, 40, 40), (SEAWEED, trial & 1, 0, 3 * (trial % 80), 156)])
+        old = fishref.creatures(r)[1]
+        set_life(r, 1, 3, flip=trial % 90)
+        r.call("fish_bgq_reset")
+        for t in (1, 2):
+            r.call("fish_weed", x=1)
+            assert fishref.creatures(r)[1]["kind"] == SEAWEED and slot(r, 1)["life"] == 3 - t
+        if trial % 90 >= 88:        # its sway falls due first
+            r.call("fish_bgq_reset")
+        r.call("fish_weed", x=1)
+        new = fishref.creatures(r)[1]
+        assert is_newcomer(new), new
+        kinds[new["kind"]] += 1
+        shows = expected_box(new) if role(new["kind"]) in (ROLE_STILL, ROLE_RISE) else None
+        assert queue(r) == [expected_box(old)] + ([shows] if shows else []), (old, new)
+    assert kinds[SEAWEED] and kinds[BUBBLES]
+    r.call("fish_bgq_reset")
+
+
+def test_queue_is_a_fifo_without_repeats(r):
+    """fish_bgq_push / fish_bgq_pop: oldest first round the ring; a rect
+    already queued isn't queued again (once taken off, it can be); full, the
+    queue becomes the five full-width strips; fish_init empties it."""
+    r.call("fish_bgq_reset")
+    assert pop(r) is None
+    rects = [(c, c + 5, 156 + c, 192) for c in range(30)]
+    for rect in rects[:12]:
+        push(r, rect)
+    push(r, rects[3])                           # queued already
+    assert queue(r) == rects[:12]
+    assert [pop(r) for _ in range(5)] == rects[:5]
+    push(r, rects[2])                           # taken off: it can come back
+    for rect in rects[12:24]:                   # round the end of the ring
+        push(r, rect)
+    want = rects[5:12] + [rects[2]] + rects[12:24]
+    assert queue(r) == want and len(want) == BGQ_MAX
+    push(r, rects[7])                           # full, but queued already
+    assert queue(r) == want
+    assert [pop(r) for _ in range(BGQ_MAX + 1)] == want + [None]
+    for rect in rects[5:25]:
+        push(r, rect)
+    assert queue(r) == rects[5:25]
+    push(r, rects[2])                           # the 21st
+    assert queue(r) == STRIPS
+    push(r, rects[0])
+    push(r, STRIPS[2])
+    assert queue(r) == STRIPS + [rects[0]]
+    assert [pop(r) for _ in range(7)] == STRIPS + [rects[0], None]
+    for rect in rects[:3]:
+        push(r, rect)
+    for _ in range(3):
+        assert pop(r) in rects[:3]
+    assert pop(r) is None and queue(r) == []
+
+
+def test_init_places_and_draws_the_set(built):
+    """fish_init with fish_count creatures over junk: they're placed
+    anywhere in their bands, FISH_BG has every Seaweed, the screen is the
+    composition, the queue is empty."""
+    for count, seed in ((6, 0x4D2A), (10, 0x1357), (10, 0xBEEF), (0, 0x2468)):
+        def prepare(s):
+            junk(s)
+            s.poke(s.addr("fish_count"), count)
+        s = start(FX, seed=seed, prepare=prepare)
+        assert s.peek(s.addr("fish_n")) == count
+        for i, c in enumerate(fishref.creatures(s)):
+            ys, xs = fishref.band(c["kind"], True)
+            assert c["y"] in ys and c["x"] in xs, (seed, i, c)
+        assert fishref.fish_bg(s) == fishref.expected_bg(s), seed
+        assert s.page_bytes(PAGE1) == fishref.expected_page(s), seed
+        assert queue(s) == [] and pop(s) is None
+
+
+def test_incremental_equals_full(built):
+    """6 creatures, 3,000 hops in random slot order through fish_hop and its
+    rect, and fish_weed (often due to sway or go), each queued job drained:
+    after each, page 1 and FISH_BG are as the composition rule has them."""
+    def prepare(s):
+        junk(s)
+        s.poke(s.addr("fish_count"), 6)
+    s = start(FX, seed=0x5EED, prepare=prepare)
+    # three Seaweeds (two stacked), a Bubble near the top and a Crab among the rest
+    for i, (kind, x, y) in ((0, (SEAWEED, 120, 156)), (1, (SEAWEED, 128, 156)),
+                            (2, (BUBBLES, 125, 6)), (3, (CRAB, 100, 158)),
+                            (4, (SEAWEED, 20, 156))):
+        for name, v in (("fish_kind", kind), ("fish_xl", x), ("fish_xh", 0), ("fish_yl", y),
+                        ("fish_yh", 0), ("fish_dir", 0)):
+            s.poke(s.addr(name) + i, v)
+        set_life(s, i, 2000, flip=10 * i)
+    s.call("fish_bg_floor", max_cycles=2_000_000)
+    s.mem.ram[0x2000:0x4000] = bytes(0x2000)
+    s.call("bg_to_screen")
+    redraw_all(s)
+    check(s, "start")
+    rnd = random.Random(71)
+    seen = Counter()
+    for step in range(3000):
+        i = rnd.randrange(6)
+        c = fishref.creatures(s)[i]
+        if role(c["kind"]) == ROLE_STILL:
+            v = rnd.random()
+            if v < 0.03:
+                set_life(s, i, 1)
+            elif v < 0.4:
+                set_life(s, i, slot(s, i)["life"], flip=89)
+            s.call("fish_weed", x=i)
+            new = fishref.creatures(s)[i]
+            if v < 0.03:
+                assert is_newcomer(new), new
+                seen["seaweed goes"] += 1
+            else:
+                assert new == dict(c, frame=c["frame"] ^ (v < 0.4))
+                seen["sway" if v < 0.4 else "tick"] += 1
+        else:
+            turn = role(c["kind"]) != ROLE_RISE and fishref.Rng(s.peek16(RNG)).below(42) == 0
+            want, gone = fishref.hop(c, turn)
+            rect, _ = hop(s, i)
+            new = fishref.creatures(s)[i]
+            if rect:
+                assert rect[1] - rect[0] <= 8
+                assert redraw(s, rect)[1]
+            if gone:
+                assert is_newcomer(new), new
+                seen["goes"] += 1
+                seen["seaweed comes"] += new["kind"] == SEAWEED
+                seen["last row shows"] += expected_box(c) is not None
+            else:
+                assert new == want
+        if queue(s):
+            seen["jobs"] += len(queue(s))
+            drain(s)
+        assert fishref.fish_bg(s) == fishref.expected_bg(s), (step, i, c)
+        check(s, step, i, c)
+    print("\nincremental run:", dict(seen))
+    # every path was taken: sways, Seaweeds going, creatures going (a Bubble's
+    # last row still showing as it goes), and jobs drained
+    assert seen["sway"] >= 40 and seen["seaweed goes"] >= 3 and seen["goes"] >= 10, seen
+    assert seen["last row shows"] >= 1 and seen["jobs"] >= 40, seen
+
+
+def test_crowded_floor(r):
+    """Review Focus 4: three Seaweeds stacked, a Crab walking through them, a
+    Seaweed swaying and going while the Crab or a Bubble is over it: page 1
+    and FISH_BG as the composition rule has them after each change."""
+    weeds = [(SEAWEED, 0, 0, 100, 156), (SEAWEED, 1, 0, 108, 156), (SEAWEED, 0, 0, 116, 156)]
+    for order in ("crab last", "crab first"):
+        clear(r)
+        r.call("fish_bgq_reset")
+        crab = (CRAB, 0, 0, 60, 158)
+        bubble = (BUBBLES, 0, 0, 120, 170)
+        specs = weeds + [crab, bubble] if order == "crab last" else [crab, bubble] + weeds
+        place(r, specs)
+        ci, bi = specs.index(crab), specs.index(bubble)
+        wi = [specs.index(w) for w in weeds]
+        for i in wi:
+            set_life(r, i, 2000, flip=0)
+        redraw_all(r)
+        check(r, order, "start")
+        events = 0
+        for step in range(60):
+            r.poke16(RNG, rng_for(False, 1 + 389 * step))     # the Crab keeps on
+            rect, _ = hop(r, ci)
+            if rect:
+                assert redraw(r, rect)[1]
+            check(r, order, step)
+            cx = fishref.creatures(r)[ci]["x"]
+            for i in wi:
+                w = fishref.creatures(r)[i]
+                if w["kind"] != SEAWEED or not w["x"] - 20 <= cx <= w["x"] + 20:
+                    continue
+                set_life(r, i, slot(r, i)["life"], flip=89)     # sways under the Crab
+                r.call("fish_weed", x=i)
+                drain(r)
+                check(r, order, step, "sway", i)
+                events += 1
+                if step % 4 == 0:                                # and goes
+                    set_life(r, i, 1)
+                    r.call("fish_weed", x=i)
+                    drain(r)
+                    assert fishref.fish_bg(r) == fishref.expected_bg(r)
+                    check(r, order, step, "goes", i)
+                    events += 1
+        # under the Bubble: a Seaweed sways, then goes, while it rises over it
+        r.poke(r.addr("fish_kind") + wi[1], SEAWEED)
+        r.poke(r.addr("fish_xl") + wi[1], 115)
+        r.poke(r.addr("fish_xh") + wi[1], 0)
+        r.poke(r.addr("fish_yl") + wi[1], 156)
+        r.poke(r.addr("fish_yh") + wi[1], 0)
+        set_life(r, wi[1], 500, flip=0)
+        r.call("fish_bg_floor", max_cycles=2_000_000)
+        r.mem.ram[0x2000:0x4000] = bytes(0x2000)
+        r.call("bg_to_screen")
+        redraw_all(r)
+        check(r, order, "bubble")
+        for step in range(8):
+            rect, _ = hop(r, bi)
+            if rect:
+                assert redraw(r, rect)[1]
+            set_life(r, wi[1], 500 if step < 7 else 1, flip=89)
+            r.call("fish_weed", x=wi[1])
+            drain(r)
+            assert fishref.fish_bg(r) == fishref.expected_bg(r)
+            check(r, order, "bubble", step)
+        assert events > 6
+    r.call("fish_bgq_reset")
+
+
+def test_motion_costs(r, spawns):
+    """What spawning, a hop (before its redraw) and a Seaweed's tick cost, for
+    Task 5's budget; printed, and held under fixed limits."""
+    rnd = random.Random(73)
+    cost = {}
+
+    def note(label, cycles):
+        cost.setdefault(label, []).append(cycles)
+
+    for anywhere, _, cycles in spawns:
+        note("spawn anywhere" if anywhere else "spawn newcomer", cycles)
+    for trial in range(3000):
+        kind = rnd.choice([k for k in range(14) if role(k) != ROLE_STILL])
+        k = kind_of(kind)
+        clear(r)
+        if trial % 3 == 0:                      # a full queue: the strips
+            r.call("fish_bgq_reset")
+            for c in range(20):
+                push(r, (c, c + 1, 156, 192))
+        if k["role"] == ROLE_RISE:
+            y = rnd.choice((100, -k["ch"] + 1, -k["ch"]))
+            place(r, [(kind, 0, 0, rnd.randrange(4, 264), y)])
+        else:
+            x = rnd.choice((100, -k["cw"] - 1, 281, -k["cw"] + 1))
+            place(r, [(kind, 0, rnd.randrange(2), x, fishref.band(kind, True)[0][0])])
+        old = fishref.creatures(r)[0]
+        turn = k["role"] != ROLE_RISE and fishref.Rng(r.peek16(RNG)).below(42) == 0
+        _, cycles = hop(r, 0)
+        note("hop, goes" if fishref.hop(old, turn)[1] else "hop", cycles)
+    for trial in range(1500):
+        clear(r)
+        if trial % 3 == 0:
+            r.call("fish_bgq_reset")
+            for c in range(20):
+                push(r, (c, c + 1, 156, 192))
+        place(r, [(SEAWEED, 0, 0, rnd.randrange(246), 156)])
+        what = trial % 3
+        set_life(r, 0, (500, 500, 1)[what], flip=(10, 89, 10)[what])
+        note(("weed tick", "weed sway", "weed goes")[what], r.call("fish_weed", x=0))
+    r.call("fish_bgq_reset")
+    rows = []
+    for label, cs in cost.items():
+        cs = sorted(cs)
+        rows.append(f"{label:<15} worst {cs[-1]:5}  median {cs[len(cs) // 2]:5}  ({len(cs)})")
+    print("\nmotion costs (cycles):\n" + "\n".join(rows))
+    limits = {"spawn anywhere": 3500, "spawn newcomer": 4000, "hop": 2000, "hop, goes": 5000,
+              "weed tick": 60, "weed sway": 1500, "weed goes": 5000}
+    for label, limit in limits.items():
+        assert max(cost[label]) < limit, (label, max(cost[label]))

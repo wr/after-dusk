@@ -46,7 +46,7 @@ rng_next:
         rts
 
 ; rng_below: A = n (1-255). Returns 0..n-1 in A, without modulo bias
-; (draws under the next power of two and rejects values >= n). Keeps Y.
+; (draws under the next power of two and rejects values >= n). Keeps X and Y.
 rng_below:
         sta NBELOW
         sec
