@@ -202,7 +202,7 @@ RC_MPBYTE  = 37                 ; a pass kernel's byte (three layers over the fl
                                 ;   is in zero page)
 ; the step's estimate (fish_est), cycles
 EST_FIXC   = 900 + 16 * (11 + FC_CALL + FC_EVENT + FC_EVACT + FC_SETUP + FC_PATCH + (7 * FC_PATCHCOL + 1) / 2 + FC_ROWS)
-                                ; fish_hop, a begin (11: ST_BEGIN 9 and a unit or two), a run's start
+                                ; fish_hop, a begin (ST_BEGIN 11), a run's start
 EST_SLOTC  = 16 * (8 + FC_EVPER); per slot in use: the listing (ST_BEGPER 8) and the scan
 
 .segment "FISHCODE2"

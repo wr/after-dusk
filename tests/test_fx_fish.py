@@ -1101,6 +1101,26 @@ def test_pieces_are_tight(r):
                     hold("rows", units, cycles, rows_var(x, rect[1] - rect[0], bg=True), (specs, rect, left))
             if r.carry():
                 break
+    # the cap's dearest case, deterministically: the empty sea, runs of 63-156 rows, every width,
+    # budgets that leave one or two rows after FC_ROWS and FC_PART (the rows piece then pays for
+    # the multiply at 63 rows and every try)
+    clear(r)
+    fixed = a("FC_CALL") + a("FC_EVENT") + a("FC_SETUP") + a("FC_ROWS") + a("FC_PART")
+    for w in range(1, 9):
+        for n in range(63, 157):
+            rect = (14, 14 + w, 0, n)
+            set_rect(r, rect)
+            r.call("fish_rect_begin")
+            trace_call(r, "fish_rect_rows", fixed)             # (stops at FC_PART: the run is set up)
+            row_cost = r.peek16(a("rd_pend") + 4)               # rd_cost
+            for k in (1, 2):
+                for d in (0, 1, 2):
+                    set_rect(r, rect)
+                    r.call("fish_rect_begin")
+                    left = fixed + (k * row_cost + 15) // 16 + d
+                    for kind, units, cycles, x in pieces_of(trace_call(r, "fish_rect_rows", left)):
+                        if kind == "rows":
+                            hold("rows (cap)", units, cycles, rows_var(x, w), (rect, left))
     print("\nworst slack by piece (slack, units, cycles):",
           {k: v[:3] for k, v in sorted(worst.items())})
 
@@ -2177,48 +2197,53 @@ def test_screen_is_always_right(built):
 
 
 def split(s):
-    """One step: (cycles, cycles outside the calls it pays for, the dearest
-    hop's scheduling). A hop pays HOP_SCHED for the step's own work on it:
-    st_pick and st_hop apart from the calls they make (fish_hop, renew,
-    st_begin, fish_rect_rows), so those count as paid and are measured
-    st_pick + st_hop a hop."""
+    """One step: (cycles, cycles outside what is paid for, the dearest hop's
+    scheduling, cycles outside what is paid for counting all scheduling as
+    unpaid). A hop pays HOP_SCHED for the step's own work on it: the st_pick
+    that found it and the st_hop that made it (apart from the calls they
+    make: fish_hop, renew, st_begin, fish_rect_rows), so those are paid, and
+    measured st_pick + st_hop a hop; a st_pick that finds nothing, or whose
+    st_hop can't afford the hop (never reaching fish_hop), is paid by nobody
+    and stays in the step's own work."""
     a = s.addr
-    paid = {a(n) for n in ("fish_weed", "fish_hop", "renew", "st_begin", "fish_rect_rows", "fish_bg_rows",
-                           "st_pick", "st_hop")}
-    sched_outer = {a("st_pick"), a("st_hop")}
-    sched_inner = {a(n) for n in ("fish_hop", "renew", "st_begin", "fish_rect_rows")}
+    paid = {a(n) for n in ("fish_weed", "fish_hop", "renew", "st_begin", "fish_rect_rows", "fish_bg_rows")}
+    sched_outer = {a("st_pick"): "pick", a("st_hop"): "hop"}
     mpu = s.mpu
     ret = 0x0200 - 1
     s.mem.ram[0x1FF], s.mem.ram[0x1FE] = ret >> 8, ret & 0xFF
     mpu.sp, mpu.pc, mpu.p = 0xFD, OVL + 3, 0x34
     t0 = mpu.processorCycles
     inside, inside_cycles = None, 0
-    outer, inner, cur, parts = None, None, 0, []
+    outer, cur, hopped, parts = None, 0, False, []     # parts: (kind, own cycles, reached fish_hop)
     while mpu.pc != 0x0200:
         pc = mpu.pc
         if inside is None and pc in paid:
             inside = (mpu.sp, mpu.processorCycles)
+            if pc == a("fish_hop"):
+                hopped = True
         if outer is None and pc in sched_outer:
-            outer, cur = mpu.sp, 0
-        if outer is not None and inner is None and pc in sched_inner:
-            inner = mpu.sp
+            outer, cur, hopped = (mpu.sp, sched_outer[pc]), 0, False
         t = mpu.processorCycles
         mpu.step()
-        if outer is not None and inner is None:
+        if outer is not None and inside is None:
             cur += mpu.processorCycles - t
-        if inner is not None and mpu.sp > inner:
-            inner = None
-        if outer is not None and mpu.sp > outer:
-            outer = None
-            parts.append(cur)
         if inside and mpu.sp > inside[0]:
             inside_cycles += mpu.processorCycles - inside[1]
             inside = None
+        if outer is not None and mpu.sp > outer[0]:
+            parts.append((outer[1], cur, hopped))
+            outer = None
         assert mpu.processorCycles - t0 < 100_000
     total = mpu.processorCycles - t0
-    # a hop's scheduling is a st_pick and the st_hop after it (the last st_pick, finding nothing, stands alone)
-    sched = max([parts[i] + parts[i + 1] for i in range(0, len(parts) - 1, 2)] + [0])
-    return total, total - inside_cycles, sched
+    # a hop's scheduling: a st_pick and the st_hop after it, paid when that st_hop reached fish_hop
+    sched_paid, sched = 0, 0
+    for i in range(len(parts) - 1):
+        if parts[i][0] == "pick" and parts[i + 1][0] == "hop" and parts[i + 1][2]:
+            c = parts[i][1] + parts[i + 1][1]
+            sched_paid += c
+            sched = max(sched, c)
+    own_all = total - inside_cycles
+    return total, own_all - sched_paid, sched, own_all
 
 
 def test_cost_estimates_are_safe(rh, hop_dir, hop_size):
@@ -2308,26 +2333,28 @@ def test_cost_estimates_are_safe(rh, hop_dir, hop_size):
                 xy = (rnd.choice((-k["cw"] - rnd.randrange(3), 280 + rnd.randrange(3))), specs[i][4])
             place(r, specs[:i] + [specs[i][:3] + xy] + specs[i + 1:])
         r.poke(a("fish_newslot"), 0xFF)
-        cycles = r.call("fish_hop", x=i)
+        cycles = r.call("fish_hop", x=i)            # (its scheduling, HOP_SCHED, is held apart below)
         if r.peek(a("fish_newslot")) == i:
             cycles += r.call("renew", x=i)
-            paid("hop, gone", cycles, a("HOP_GONE") + a("ARR_UNITS"))
+            paid("hop, gone", cycles, a("HOP_GONE") - a("HOP_SCHED") + a("ARR_UNITS"))
         else:
-            paid("hop", cycles, a("HOP_STAY"))
+            paid("hop", cycles, a("HOP_STAY") - a("HOP_SCHED"))
     print("\nleast cycles to spare (16 x units - cycles):",
           ", ".join(f"{k} {v}" for k, v in sorted(spare.items())))
-    # the step's own work, outside the calls it pays for; and a hop's scheduling, which it pays for
-    most, sched = 0, 0
+    # the step's own work, outside what it pays for (a hop's scheduling is paid, HOP_SCHED, only
+    # when the hop happens); and a hop's scheduling against that
+    most, most_all, sched = 0, 0, 0
     for count, seed in ((6, 0x4D2A), (6, 0xBEEF), (10, 0x1357), (10, 0x2468)):
         def prepare(s):
             s.poke(s.addr("fish_count"), count)
         s = start(FX, seed=seed, prepare=prepare, build=hop_dir)
         for _ in range(600):
-            _, own, sc = split(s)
-            most, sched = max(most, own), max(sched, sc)
+            _, own, sc, own_all = split(s)
+            most, most_all, sched = max(most, own), max(most_all, own_all), max(sched, sc)
     units = a("STEP_UNITS")
-    print(f"step's own work at most {most} cycles; with STEP_UNITS {units}: "
-          f"{most + 16 * units + POLLS} of {HARD}; a hop's scheduling at most {sched} (HOP_SCHED {16 * a('HOP_SCHED')})")
+    print(f"step's own work at most {most} cycles ({most_all} counting every hop's scheduling as unpaid); "
+          f"with STEP_UNITS {units}: {most + 16 * units + POLLS} of {HARD}; "
+          f"a hop's scheduling at most {sched} (HOP_SCHED {16 * a('HOP_SCHED')})")
     assert most + 16 * units + POLLS < HARD
     assert sched <= 16 * a("HOP_SCHED")
 

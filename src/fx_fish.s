@@ -798,7 +798,7 @@ fish_step:
         jsr fish_rect_rows
         bcc @rts
         stz fish_pending
-@hop:   jsr st_pick                ; 4. the hops due
+@hop:   jsr st_pick             ; 4. the hops due
         bmi st_bg               ; none: 5.
         ldy ST_DONE
         beq :+
