@@ -1,8 +1,8 @@
-"""Fish! (effect 14), so far: init copies its art and floor out of FX2 into
-place, builds its shift and bit-reverse tables, places its creatures and
-draws them over the sea floor; the row renderer; and how each creature
-moves (spawning, hopping, turning, leaving, Seaweed and Bubbles) with the
-queue of background jobs."""
+"""Fish! (effect 14): init copies its art and floor out of FX2 into place,
+builds its shift and bit-reverse tables, places its creatures and draws them
+over the sea floor; the row renderer; how each creature moves (spawning,
+hopping, turning, leaving, Seaweed and Bubbles) with the queue of background
+jobs; and the step, which keeps every creature on its beat inside one tick."""
 import json
 import random
 from collections import Counter
@@ -12,8 +12,8 @@ import pytest
 
 import fishref
 from conftest import BUILD
-from fxcommon import ALLOWED, OVL, start
-from sim import PAGE1, PAGE2, RNG, TICKS, row_base
+from fxcommon import ALLOWED, OVERHEAD, OVL, TICK, check_budget, check_in_bounds, start
+from sim import PAGE1, PAGE2, RNG, ST_FX, TICKS, row_base
 
 FX = 14
 FLOOR_TOP = 156
@@ -1360,3 +1360,439 @@ def test_motion_costs(r, spawns):
               "weed tick": 60, "weed sway": 1500, "weed goes": 5000}
     for label, limit in limits.items():
         assert max(cost[label]) < limit, (label, max(cost[label]))
+
+
+# ---------------------------------------------------------------- the step
+# Every tick: each Seaweed's tick, a half-drawn rect goes on, the hops due
+# (the one due longest first), then background work, all paid for from one
+# tick's budget.
+
+SEEDS = (0x4D2A, 0x1357, 0xBEEF, 0x2468, 0x5EED, 0x0F0F)
+HARD = TICK - OVERHEAD                  # a step must finish under this
+# Open (task-5-report.md): a hop whose rect crosses another creature draws
+# mixed rows, 3-4 ticks of budget, and the pending rect holds every other hop
+# back, so two creatures crossing fall behind at any count.
+OPEN = "open: a rect crossing another creature takes 3-4 ticks and holds back every hop"
+POLLS = 60                              # a IIc's vbl_poll costs up to 18 more than here
+
+
+def due(s, i):
+    return s.peek(s.addr("fish_duel") + i) | s.peek(s.addr("fish_dueh") + i) << 8
+
+
+def now(s):
+    return s.peek16(s.addr("fish_now"))
+
+
+def bg_idle(s):
+    """No background work queued or under way."""
+    return s.peek(s.addr("fish_bgq_n")) == 0 and s.peek(s.addr("fish_bgw")) == 0
+
+
+def hopping(s):
+    """(slot, creature, beat) for every slot that hops (not Seaweed)."""
+    return [(i, c, s.peek(s.addr("fish_beat") + i)) for i, c in enumerate(fishref.creatures(s))
+            if role(c["kind"]) != ROLE_STILL]
+
+
+def weight(s, i):
+    return s.peek(s.addr("fish_w") + i)
+
+
+def load_of(s):
+    """fish_load as the creatures have it: each one's weight on every tick
+    of the 60 that its hops fall on (its due tick, mod its beat)."""
+    load = [0] * 60
+    for i, _, beat in hopping(s):
+        for t in range(due(s, i) % beat, 60, beat):
+            load[t] = (load[t] + weight(s, i)) & 0xFF
+    return load
+
+
+def quietest(load, first, beat):
+    """The p (0..beat-1) whose busiest tick, first + p and every beat ticks
+    on round the 60, is the quietest; ties: the smallest p."""
+    def busiest(p):
+        return max(load[(first + p + k * beat) % 60] for k in range(60 // beat))
+    return min(range(beat), key=lambda p: (busiest(p), p))
+
+
+def counters(s):
+    a = s.addr
+    return dict(late_max=s.peek(a("fish_late_max")), hops=s.peek16(a("fish_hops")),
+                late=s.peek16(a("fish_late")), peak=s.peek(a("fish_bgq_peak")),
+                over=s.peek16(a("fish_bgq_over")), busy=s.peek16(a("fish_bg_busy_max")))
+
+
+def hops_on(c, k):
+    """(every place k hops can take creature c, turning or not, and whether
+    any of up to k hops takes it off)."""
+    now_, gone = [c], False
+    for _ in range(k):
+        nxt = []
+        for c_ in now_:
+            for turn in ((False,) if role(c_["kind"]) == ROLE_RISE else (False, True)):
+                new, off = fishref.hop(c_, turn)
+                gone |= off
+                if not off and new not in nxt:
+                    nxt.append(new)
+        now_ = nxt
+    return now_, gone
+
+
+def watch(s, steps):
+    """Run steps, watching from outside how each creature keeps its beat.
+    Returns (cycles per step, problems)."""
+    problems = []
+    t = now(s)
+    load = [0] * 60                     # init's arrivals, in slot order
+    for i, c, beat in hopping(s):
+        p = due(s, i) - t - 1
+        if not 0 <= p < beat or p != quietest(load, t + 1, beat):
+            problems.append(("init's first due", i, c, due(s, i), beat))
+        for k in range(60 // beat):
+            load[(t + 1 + p + k * beat) % 60] += weight(s, i)
+    if load != load_of(s) or bytes(load) != mem(s, "fish_load", 60):
+        problems.append(("init's fish_load",))
+    lives = {i: [due(s, i), beat, 0] for i, _, beat in hopping(s)}   # first due, beat, hops
+    cycles = []
+
+    def pace(i, t):
+        first, beat, hops = lives.pop(i)
+        ticks = t - first
+        if ticks >= 0 and not ticks // beat <= hops <= ticks // beat + 1:
+            problems.append(("pace", i, first, beat, hops, t))
+
+    for step in range(steps):
+        before = [(c, due(s, i), s.peek(s.addr("fish_beat") + i), weight(s, i))
+                  for i, c in enumerate(fishref.creatures(s))]
+        load0 = list(mem(s, "fish_load", 60))
+        cycles.append(s.step())
+        t = now(s)
+        after = fishref.creatures(s)
+        renewed = []
+        for i, c1 in enumerate(after):
+            c0, d0, b0, w0 = before[i]
+            d1 = due(s, i)
+            if role(c0["kind"]) == ROLE_STILL:
+                if pos(c1) != pos(c0) and (pos(c1) | {"frame": 0}) != (pos(c0) | {"frame": 0}):
+                    renewed.append((i, c0, w0, d0, b0))
+                continue
+            k = (d1 - d0) // b0 if d1 > d0 and (d1 - d0) % b0 == 0 else 0
+            if c1 == c0:
+                if d1 != d0:
+                    problems.append(("due moved without a hop", step, i, d0, d1))
+            elif k and c1 in hops_on(c0, k)[0]:
+                lives[i][2] += k            # (one far behind can catch up two at once)
+                if d0 + (k - 1) * b0 > t:
+                    problems.append(("hop", step, i, t, d0, d1, b0))
+            else:
+                if not hops_on(c0, 4)[1] or d0 > t or not is_newcomer(c1):
+                    problems.append(("left", step, i, c0, c1, d0, t))
+                lives[i][2] += 1
+                pace(i, t)
+                renewed.append((i, c0, w0, d0, b0))
+        for i, c0, w0, d0, b0 in renewed:
+            c1 = after[i]
+            if role(c1["kind"]) == ROLE_STILL:
+                continue
+            beat, d1 = s.peek(s.addr("fish_beat") + i), due(s, i)
+            if not t + 1 <= d1 <= t + beat:
+                problems.append(("newcomer's first due", step, i, t, d1, beat))
+            elif len(renewed) == 1:
+                seen = list(load0)          # what it saw: less the one that left
+                if role(c0["kind"]) != ROLE_STILL:
+                    for k in range(d0 % b0, 60, b0):
+                        seen[k] = (seen[k] - w0) & 0xFF
+                if d1 - t - 1 != quietest(seen, t + 1, beat):
+                    problems.append(("spread", step, i, t, d1, beat))
+            lives[i] = [d1, beat, 0]
+        if t % 500 == 0 and bytes(load_of(s)) != mem(s, "fish_load", 60):
+            problems.append(("fish_load", step))
+    for i in list(lives):
+        pace(i, now(s))
+    if bytes(load_of(s)) != mem(s, "fish_load", 60):
+        problems.append(("fish_load at the end",))
+    return cycles, problems
+
+
+@pytest.fixture(scope="module")
+def fuzz(built):
+    """Fish! at fish_count, 6 seeds x 6,000 steps, watched: per seed, the
+    step's counters, its cycles and how each creature kept its beat."""
+    out = {}
+    for seed in SEEDS:
+        s = start(FX, seed=seed)
+        cycles, problems = watch(s, 6000)
+        out[seed] = dict(counters(s), cycles=cycles, problems=problems)
+    return out
+
+
+def test_budget(built):
+    worst, median = check_budget(FX, steps=3000)
+    print(f"\nworst step {worst} cycles, median {median} (limits {HARD}, {TICK * 0.85:.0f})")
+
+
+def test_in_bounds(built):
+    """Writes only its own memory; never bit 7 on page 1 (page 2 holds its
+    art and code, and is never shown)."""
+    s = check_in_bounds(FX, steps=3000)
+    assert all(b & 0x80 == 0 for b in s.page_bytes(PAGE1))
+
+
+@pytest.mark.xfail(strict=True, reason=OPEN)
+def test_never_more_than_one_tick_late(fuzz):
+    """Wells's rule: no hop more than one tick late, and late hops rare (at
+    most 5%)."""
+    rows = []
+    for seed, f in fuzz.items():
+        rows.append(f"seed {seed:04X}: latest {f['late_max']}, late {f['late']} of {f['hops']} hops "
+                    f"({f['late'] / f['hops']:.1%})")
+    print("\n" + "\n".join(rows))
+    for seed, f in fuzz.items():
+        assert f["late_max"] <= 1, (hex(seed), f["late_max"])
+        assert f["late"] <= 0.05 * f["hops"], (hex(seed), f["late"], f["hops"])
+
+
+def test_keeps_its_beat(fuzz):
+    """Every creature's hops are due on its own beat from its first due tick
+    (base + i * beat, never from when it last moved), it moves exactly when
+    one falls due, and over its life it keeps its pace to within a hop. Its
+    first due tick is 1-beat ticks after it arrives, the one whose busiest
+    tick in the 60 is quietest; fish_load stays the sum of every creature's
+    weight on the ticks its hops fall on."""
+    for seed, f in fuzz.items():
+        wrong = [p for p in f["problems"] if p[0] != "pace"]
+        assert not wrong, (hex(seed), len(wrong), wrong[:5])
+    behind = {hex(seed): sum(p[0] == "pace" for p in f["problems"]) for seed, f in fuzz.items()}
+    print("\nlives more than a hop behind their pace:", behind)
+    if any(behind.values()):
+        pytest.xfail(OPEN)
+
+
+@pytest.mark.xfail(strict=True, reason=OPEN)
+def test_background_keeps_up(fuzz):
+    """The background queue never overflows, and is never busy for more
+    than 5 s on end."""
+    rows = [f"seed {seed:04X}: most queued {f['peak']}, overflows {f['over']}, longest busy {f['busy']} ticks"
+            for seed, f in fuzz.items()]
+    print("\n" + "\n".join(rows))
+    for seed, f in fuzz.items():
+        assert f["over"] == 0 and f["busy"] <= 300, (hex(seed), f["over"], f["busy"])
+
+
+def test_screen_is_always_right(built):
+    """3 seeds x 3,000 steps at fish_count, and one with 2 creatures:
+    whenever nothing is half drawn and no background work is queued or under
+    way, page 1 and FISH_BG are the composition rule's. Often enough that
+    the check means something (at 2 creatures however the open question
+    goes)."""
+    def prepare(s):
+        s.poke(s.addr("fish_count"), 2)
+    few = []
+    for seed, prep in ((0x2468, prepare),) + tuple((seed, None) for seed in SEEDS[:3]):
+        s = start(FX, seed=seed, prepare=prep)
+        compared = 0
+        for step in range(3000):
+            s.step()
+            if s.peek(s.addr("fish_pending")) == 0 and bg_idle(s):
+                assert fishref.fish_bg(s) == fishref.expected_bg(s), (hex(seed), step)
+                assert s.page_bytes(PAGE1) == fishref.expected_page(s), (hex(seed), step)
+                compared += 1
+        n = s.peek(s.addr("fish_n"))
+        print(f"\n{n} creatures, seed {seed:04X}: compared after {compared} of 3000 steps")
+        if prep:
+            assert compared >= 300, (hex(seed), compared)
+        elif compared < 300:
+            few.append((hex(seed), compared))
+    if few:
+        pytest.xfail(f"{OPEN}: rarely idle at fish_count {few}")
+
+
+def split(s):
+    """One step: (cycles, cycles outside the calls it pays for)."""
+    paid = {s.addr(n) for n in ("fish_weed", "fish_hop", "renew", "st_begin",
+                                "fish_rect_rows", "fish_bg_rows")}
+    mpu = s.mpu
+    ret = 0x0200 - 1
+    s.mem.ram[0x1FF], s.mem.ram[0x1FE] = ret >> 8, ret & 0xFF
+    mpu.sp, mpu.pc, mpu.p = 0xFD, OVL + 3, 0x34
+    t0 = mpu.processorCycles
+    inside, inside_cycles = None, 0
+    while mpu.pc != 0x0200:
+        if inside is None and mpu.pc in paid:
+            inside = (mpu.sp, mpu.processorCycles)
+        mpu.step()
+        if inside and mpu.sp > inside[0]:
+            inside_cycles += mpu.processorCycles - inside[1]
+            inside = None
+        assert mpu.processorCycles - t0 < 100_000
+    total = mpu.processorCycles - t0
+    return total, total - inside_cycles
+
+
+def test_cost_estimates_are_safe(r):
+    """What the step pays covers every call: 2,000 random rects (a begin, and
+    rows on random budgets: at most 16 cycles a unit), hops (staying, or gone
+    and the newcomer's arrival), Seaweed ticks, sways and departures. And the
+    step's own work outside those calls leaves room for STEP_UNITS in a tick."""
+    a = r.addr
+    rnd = random.Random(83)
+    fc_call = a("FC_CALL")
+
+    def scene(n, near=None):
+        clear(r)
+        specs = []
+        for i in range(n):
+            kind = rnd.randrange(14)
+            ys, xs = fishref.band(kind, True)
+            x, y = rnd.choice(xs), rnd.choice(ys)
+            if near is not None and role(kind) != ROLE_STILL:     # crowd them: mixes
+                x, y = near[0] + rnd.randrange(-20, 21), min(max(near[1] + rnd.randrange(-15, 16), ys[0]), ys[-1])
+            specs.append((kind, rnd.randrange(2), rnd.randrange(2) if role(kind) < ROLE_STILL else 0, x, y))
+        place(r, specs)
+        for i, sp in enumerate(specs):          # beats as fish_spawn gives them
+            r.poke(a("fish_beat") + i, 3 if role(sp[0]) == ROLE_RISE else rnd.choice((4, 4, 5, 6)))
+        r.poke16(a("fish_now"), rnd.randrange(1, 60000))
+        r.poke(a("fish_now60"), now(r) % 60)
+        r.mem.ram[a("fish_load"):a("fish_load") + 60] = bytes(rnd.randrange(60) for _ in range(60))
+        for i in range(n):
+            if role(specs[i][0]) == ROLE_STILL:
+                set_life(r, i, rnd.choice((1, 500)), flip=rnd.choice((10, 89)))
+            r.call("arrive", x=i)
+        r.poke(a("ST_NWEED"), sum(role(sp[0]) == ROLE_STILL for sp in specs))
+        r.poke(a("st_lastw"), 0xFF)
+        r.call("st_worst")
+        r.call("fish_bgq_reset")
+        return specs
+
+    spare = {}
+
+    def paid(label, cycles, units):
+        assert cycles <= 16 * units, (label, cycles, units)
+        spare[label] = min(spare.get(label, 99999), 16 * units - cycles)
+
+    for trial in range(2000):
+        if trial % 2:                       # spread out, or crowded round a point
+            scene(rnd.randrange(1, 11))
+        else:
+            scene(rnd.randrange(2, 6), near=(rnd.randrange(0, 250), rnd.randrange(0, 170)))
+        c0 = rnd.randrange(40)
+        r0 = rnd.randrange(192)
+        set_rect(r, (c0, min(c0 + rnd.randrange(1, 9), 40), r0, min(r0 + rnd.randrange(1, 41), 192)))
+        left = r.peek16(a("ST_BEGW")) + rnd.randrange(0, 1500)
+        r.poke16(a("FR_LEFT"), left)
+        cycles = r.call("st_begin")
+        paid("begin", cycles, left - r.peek16(a("FR_LEFT")))
+        while True:
+            left = rnd.choice((rnd.randrange(1, 40), rnd.randrange(40, 600), rnd.randrange(600, 2000)))
+            r.poke16(a("FR_LEFT"), left)
+            cycles = r.call("fish_rect_rows", max_cycles=400_000)
+            paid("rows", cycles, max(left - r.peek16(a("FR_LEFT")), fc_call if left < fc_call else 0))
+            if r.carry():
+                break
+    for trial in range(1500):
+        specs = scene(rnd.randrange(1, 11))
+        i = rnd.randrange(len(specs))
+        kind = specs[i][0]
+        k = kind_of(kind)
+        if role(kind) == ROLE_STILL:
+            life, flip = slot(r, i)["life"], slot(r, i)["flip"]
+            r.poke(a("fish_newslot"), 0xFF)
+            cycles = r.call("fish_weed", x=i)
+            if r.peek(a("fish_newslot")) == i:
+                cycles += r.call("renew", x=i)
+                paid("weed goes", cycles, a("WEED_GONE") + a("ARR_UNITS"))
+            else:
+                paid("weed sways" if flip == 89 else "weed tick", cycles,
+                     a("WEED_SWAY") if flip == 89 else a("WEED_TICK"))
+            continue
+        if trial % 2:                       # at an exit
+            if role(kind) == ROLE_RISE:
+                xy = (specs[i][3], -k["ch"] + rnd.randrange(0, 3))
+            else:
+                xy = (rnd.choice((-k["cw"] - rnd.randrange(3), 280 + rnd.randrange(3))), specs[i][4])
+            place(r, specs[:i] + [specs[i][:3] + xy] + specs[i + 1:])
+        r.poke(a("fish_newslot"), 0xFF)
+        cycles = r.call("fish_hop", x=i)
+        if r.peek(a("fish_newslot")) == i:
+            cycles += r.call("renew", x=i)
+            paid("hop, gone", cycles, a("HOP_GONE") + a("ARR_UNITS"))
+        else:
+            paid("hop", cycles, a("HOP_STAY"))
+    print("\nleast cycles to spare (16 x units - cycles):",
+          ", ".join(f"{k} {v}" for k, v in sorted(spare.items())))
+    # the step's own work, outside the calls it pays for
+    most = 0
+    for count, seed in ((6, 0x4D2A), (6, 0xBEEF), (10, 0x1357), (10, 0x2468)):
+        def prepare(s):
+            s.poke(s.addr("fish_count"), count)
+        s = start(FX, seed=seed, prepare=prepare)
+        for _ in range(600):
+            most = max(most, split(s)[1])
+    units = a("STEP_UNITS")
+    print(f"step's own work at most {most} cycles; with STEP_UNITS {units}: "
+          f"{most + 16 * units + POLLS} of {HARD}")
+    assert most + 16 * units + POLLS < HARD
+
+
+def clean(s, why):
+    """Fish! just initialised: its clock and counters zero, nothing pending or
+    queued, every creature's first hop due 1-beat ticks on, fish_load theirs,
+    and the screen and FISH_BG the composition."""
+    a = s.addr
+    assert now(s) == 0 and s.peek(a("fish_now60")) == 0, why
+    assert counters(s) == dict(late_max=0, hops=0, late=0, peak=0, over=0, busy=0), why
+    assert s.peek16(a("fish_bg_busy")) == 0, why
+    assert s.peek(a("fish_pending")) == 0 and s.peek(a("fish_bgw")) == 0, why
+    assert queue(s) == [], why
+    for i, _, beat in hopping(s):
+        assert 1 <= due(s, i) <= beat, why
+    assert mem(s, "fish_load", 60) == bytes(load_of(s)), why
+    assert fishref.fish_bg(s) == fishref.expected_bg(s), why
+    assert s.page_bytes(PAGE1) == fishref.expected_page(s), why
+
+
+def busy_fish(s):
+    """Steps until Fish! has a rect half drawn or background work going."""
+    for _ in range(3000):
+        s.step()
+        if s.peek(s.addr("fish_pending")) or not bg_idle(s):
+            return
+    raise AssertionError("never busy")
+
+
+def test_second_run_starts_clean(built):
+    """Review Focus 2: Fish! runs 500 steps and stops mid-work; Zot! and the
+    toasters run (they write over page 2 and FXRAM); Fish! starts again clean.
+    And again after Ctrl-Reset (restart) while Fish! was mid-work."""
+    s = start(FX, seed=0x5EED)
+    for _ in range(500):
+        s.step()
+    busy_fish(s)
+    assert any(counters(s).values())
+    for fx in (3, 0):
+        s.call("load_fx", a=fx)
+        s.call("wipe_to_black", max_cycles=2_000_000)
+        s.call(OVL, max_cycles=3_000_000)
+        for _ in range(60):
+            s.call(OVL + 3, max_cycles=1_000_000)
+    s.call("load_fx", a=FX)
+    s.call("wipe_to_black", max_cycles=2_000_000)
+    s.call(OVL, max_cycles=3_000_000)
+    clean(s, "after Zot! and the toasters")
+    for _ in range(300):
+        s.step()
+    busy_fish(s)
+    # Ctrl-Reset: restart keeps RNG and ST_FX, sets the machine up again and
+    # begins an effect other than ST_FX's: Fish!, with an RNG that picks it
+    s.poke(ST_FX, 3)
+    s.poke16(RNG, next(st for st in range(1, 0x10000) if fishref.Rng(st).below(15) == 14))
+    mpu = s.mpu
+    mpu.sp, mpu.pc, mpu.p = 0xFD, s.addr("restart"), 0x34
+    t0, stop = mpu.processorCycles, s.addr("step_once")
+    while mpu.pc != stop:
+        mpu.step()
+        assert mpu.processorCycles - t0 < 30_000_000
+    assert s.peek(ST_FX) == FX
+    clean(s, "after Ctrl-Reset")

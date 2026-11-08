@@ -236,12 +236,13 @@ STEP1      = blka_m4 - blka_m5  ; bytes in a step
 ; none reaching the floor: FC_SWITCH more for its first row on it). A row of
 ; n >= 2 costs FC_MIX + n * FC_MIXPER, and n >= 3 another n * FC_MIXNP.
 ; Measured worst cases (cycles): a call that has to stop, about 155 (ten
-; listed); finding who is in a run 234 + ~145 per creature; setting it up
+; listed), and about 172 when it stops at the switch to the floor after a
+; row; finding who is in a run 234 + ~145 per creature; setting it up
 ; 622; a patch 654; the switch 452; rows: empty 182, sea 254 / 286 facing
 ; left, floor 429 / 472; mixes, every creature facing left over the floor:
 ; two 1,318, three 3,512 (4,115 for a run's first row, patching all three),
 ; four 5,516, five 6,856 (all at 8 bytes wide).
-FC_CALL   = 10                  ; fish_rect_rows itself, and finding it must stop
+FC_CALL   = 11                  ; fish_rect_rows itself, and finding it must stop
 FC_EVENT  = 15                  ; a run's first row: finding who is in it
 FC_EVPER  = 9                   ;   per creature touching the rectangle
 FC_SETUP  = 40                  ;   setting the run up
@@ -307,6 +308,7 @@ fish_rect_begin:
         jsr vbl_poll
         jsr rect_setup
         stz rd_nlist
+        stz st_nrow             ; (the step pays for this by these counts)
         lda FR_R0
         sta rd_top
         sta FR_ROW
@@ -667,6 +669,7 @@ try_list:
         lda bx_r0
         cmp FR_R1
         bcs @no
+        inc st_nrow             ; (counted: begin's cost)
         jsr box_cols            ; then columns
         bcc @no
         lda FR_C0
