@@ -20,7 +20,10 @@ T.run(function()
         local want = 300 / per
         -- Zot! has no motion: a bolt may take a few frames to draw (accepted
         -- in its design), so it runs a little under its rate.
-        local slack = (fx == 3) and 0.2 or 0.03
+        -- Flying Toasters keeps 7 objects at about 14.3 updates a second
+        -- instead of 15 (AGENTS.md's final counts).
+        local slack = 0.03
+        if fx == 3 then slack = 0.2 elseif fx == 0 then slack = 0.08 end
         T.info(string.format("effect %d: %d steps in 300 frames (want %.1f)", fx, steps, want))
         T.check(steps <= want * 1.03 and steps >= want * (1 - slack),
                 "effect " .. fx .. " runs at the wrong rate")

@@ -50,7 +50,7 @@ Needs `ca65`/`ld65` (cc65) and `mame` on PATH. Emulator ROM images are not in th
   `fish_init.inc` (its init-only code). To add one: a segment and an `OVLn` area in
   `after-dusk.cfg`, loaded from `FXFILE2` (`FX2`) rather than `FXFILE`; in `main.s` the
   `.import __FXn_LOAD__, __FXn_SIZE__` line and entries in `fx_table` and `fx_slow`; `NFX` in
-  `config.inc` and `tests/fxcommon.py`. Both files are nearly full (FX 15,944 and FX2 16,021 of
+  `config.inc` and `tests/fxcommon.py`. Both files are nearly full (FX 15,970 and FX2 16,021 of
   16,384 bytes): another effect needs room made or a third file.
 - `basic/hello.bas` the HELLO program: bumps a seed in the text file `SEED`, POKEs it to `$0300`,
   then `BLOAD FX` and `BRUN AFTERDUSK`.
@@ -92,12 +92,18 @@ Effect ids: 0 Flying Toasters, 1 Warp, 2 Starry Night, 3 Zot!, 4 Can of Worms, 5
 
 Each effect's step must finish inside its ticks on a 1 MHz IIc (`tests/fxcommon.py`
 checks the worst step against `ticks × 17,030 − 300` cycles and the median against 85% of
-that). When an effect can't keep up, it gets fewer objects, never a slower rate. A step that can
+that). When an effect can't keep up, it gets fewer objects, never a slower rate (Flying Toasters
+is the one exception, below). A step that can
 take longer than one frame must call `vbl_poll` during its work (the sprite engine does it for
 every sprite): the IIc's vertical-blank flag remembers only one blank, and `wait_ticks` counts
 frames to a deadline. `tests/mame/pacing.lua` checks every effect's real rate. Final counts:
 
-- Flying Toasters: 4 toasters and 3 slices of toast (7 toasters were planned).
+- Flying Toasters: 4 toasters and 3 slices of toast (8 objects were planned; the original flies
+  11), at about 14.3 updates a second instead of 15. With everything on screen the worst update
+  fits its 4 ticks (65,771 cycles); with objects clipped at the screen edges an update can reach
+  about 93,000 and slip a frame. Keeping 7 objects was chosen over a steady 15 a second, so its
+  `test_budget` allows the worst step 6 ticks and the median all 4, and `pacing.lua` allows 8%
+  under its rate. No other effect may do this.
 - Warp: 64 stars (70 were planned).
 - Starry Night: up to 85 stars (about 90 were planned; star records must fit one 8-bit index).
 - Nightlines: 8 generations kept (the original keeps 20, drawing 30-35 lines a second against

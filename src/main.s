@@ -184,12 +184,12 @@ normalize_display:
 ; ---------------------------------------------------------------- table
 ; Without vertical blank (the cycle-counted fallback), ticks to wait after
 ; each effect's step: its ticks minus its typical work (measured medians:
-; toasters 2.7 ticks, Warp 1.6, Starry Night 0.1, Zot! idle, worms 1.7,
+; toasters 3.8 ticks, Warp 1.6, Starry Night 0.1, Zot! idle, worms 1.7,
 ; Lissajous 0.9, Nightlines 1.6, String Theory 2.2, Rose 1.4, Doodles 0.26,
 ; Shapes 1.3, Spheres 1.2, Bouncing Ball 0.4, Rainstorm 2.3; Fish! 0: it
 ; steps every tick and pads its own step to a tick in fallback mode).
 fx_slow:
-        .byte 1, 0, 4, 3, 1, 1, 3, 4, 1, 2, 2, 3, 2, 1, 0
+        .byte 0, 0, 4, 3, 1, 1, 3, 4, 1, 2, 2, 3, 2, 1, 0
 
 ; Per effect: where it is in aux memory and its size, wipe first (1/0),
 ; ticks per step. The FX file is effects 0-13 one after another from aux

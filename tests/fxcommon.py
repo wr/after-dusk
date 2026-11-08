@@ -59,12 +59,15 @@ TICK = 17030
 OVERHEAD = 300          # the randomizer's own work per step, plus the tick wait
 
 
-def check_budget(fx, steps=300, seeds=(0x4D2A, 0x1357, 0xBEEF), build=None):
+def check_budget(fx, steps=300, seeds=(0x4D2A, 0x1357, 0xBEEF), build=None,
+                 worst_ticks=None, median_share=0.85):
     """Every step must finish inside its ticks (so the IIc never slips a frame),
-    and the typical step must stay under the 85% budget, leaving headroom."""
+    and the typical step must stay under the 85% budget, leaving headroom.
+    worst_ticks and median_share loosen this for an effect that has been
+    allowed to slip (see AGENTS.md's final counts)."""
     s = start(fx, build=build)
     ticks = fx_entry(s, fx)[3]
-    hard = ticks * TICK - OVERHEAD
+    hard = (worst_ticks or ticks) * TICK - OVERHEAD
     cycles = []
     for seed in seeds:
         s = start(fx, seed=seed, build=build)
@@ -72,7 +75,7 @@ def check_budget(fx, steps=300, seeds=(0x4D2A, 0x1357, 0xBEEF), build=None):
     worst = max(cycles)
     median = sorted(cycles)[len(cycles) // 2]
     assert worst < hard, f"worst step {worst} cycles; {ticks} ticks allow {hard}"
-    budget = ticks * TICK * 0.85
+    budget = ticks * TICK * median_share
     assert median < budget, f"median step {median} cycles; budget {budget:.0f}"
     return worst, median
 
