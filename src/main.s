@@ -155,13 +155,20 @@ step_once:
 @end:   rts
 @step:  jmp OVL_STEP
 
-; pick_next: a random effect id in A, never the one in ST_FX.
+; pick_next: a random effect id in A, never the one in ST_FX. A trial disk
+; built with ONLY_FX=<id> (build.sh) always picks that effect, so it shows
+; from power-on.
 pick_next:
+.if ONLY_FX >= 0
+        lda #ONLY_FX
+        rts
+.else
 :       lda #NFX
         jsr rng_below
         cmp ST_FX
         beq :-
         rts
+.endif
 
 ; normalize_display: leave the last frame on page 1, showing.
 normalize_display:

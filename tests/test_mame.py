@@ -47,6 +47,17 @@ def test_disk(built):
     return out
 
 
+@pytest.fixture(scope="session")
+def fish_disk(built):
+    """A trial disk that shows Fish! from power-on (ONLY_FX=14), the default
+    hop size."""
+    out = built / "FISH-TRIAL.dsk"
+    env = dict(os.environ, ONLY_FX="14", OUT=str(out))
+    subprocess.run(["./build.sh"], cwd=ROOT, env=env, check=True, capture_output=True)
+    subprocess.run(["./build.sh"], cwd=ROOT, check=True, capture_output=True)  # labels back to release
+    return out
+
+
 def disk_copy(src, name, tmp_path):
     dst = tmp_path / name
     shutil.copy(src, dst)
@@ -56,6 +67,17 @@ def disk_copy(src, name, tmp_path):
 
 def test_randomizer(test_disk, tmp_path):
     run_mame("randomizer.lua", 200, disk=disk_copy(test_disk, "r.dsk", tmp_path))
+
+
+def test_fish_rate(fish_disk, tmp_path):
+    """Fish! takes 300 steps in 300 frames on the IIc."""
+    run_mame("fish_rate.lua", 60, disk=disk_copy(fish_disk, "fish.dsk", tmp_path))
+
+
+def test_fish_rate_on_enhanced_iie(fish_disk, tmp_path):
+    """Review Focus 5: without the IIc's vertical-blank latch Fish! still runs
+    within -17%..+22% of its rate (it pads its own step to about a tick)."""
+    run_mame("fish_rate.lua", 60, driver="apple2ee", disk=disk_copy(fish_disk, "fish-iie.dsk", tmp_path))
 
 
 def test_reset(built, tmp_path):

@@ -2248,6 +2248,78 @@ def test_background_keeps_up(fuzz):
         assert f["over"] == 0 and f["busy"] <= 300, (hex(seed), f["over"], f["busy"])
 
 
+# (The brief's test_count_is_the_most_that_keeps_up is not here: Ruling 13,
+# task-9-context.md, sets fish_count to 3 for both hop sizes with a named
+# compromise each, pinned by test_trial_count below; the strict rule's count
+# is RULE_COUNT.)
+
+
+def late_watch(s, steps):
+    """Run steps, watching lateness from outside: (cycles per step, the
+    longest run of ticks with any hop overdue, the most any creature was ever
+    overdue (now - due over the hoppers with a beat, after each step), and
+    how many hops started two or more ticks late (a due that advanced from
+    two or more ticks before now))."""
+    cycles, run, longest, most, two_late = [], 0, 0, 0, 0
+    for _ in range(steps):
+        before = {i: due(s, i) for i, _, _ in hopping(s) if weight(s, i)}
+        cycles.append(s.step())
+        t = now(s)
+        over = -1
+        for i, _, _ in hopping(s):
+            if not weight(s, i):
+                continue
+            d = due(s, i)
+            if i in before and d != before[i] and t - before[i] >= 2:
+                two_late += 1
+            over = max(over, t - d)
+        most = max(most, over)
+        run = run + 1 if over > 0 else 0
+        longest = max(longest, run)
+    return cycles, longest, most, two_late
+
+
+def test_trial_count(hop_dir, hop_size):
+    """Ruling 13: fish_count is 3 in both builds, each with its accepted
+    compromise, pinned here over 6 seeds x 6,000 steps. Both: every step fits
+    its tick, and the screen is right whenever nothing is pending (3 seeds x
+    3,000, at least 300 comparisons each). 4-dot: late hops at most 1% of
+    hops, and at most 3 hops two ticks late over all seeds (none later).
+    2-dot: no bound on lateness (a crossing pair falls behind together while
+    it overlaps), but every late creature catches up: no creature is ever
+    overdue by 60 ticks (a second); printed: late, late_max and the longest
+    run of late ticks per seed."""
+    count = 3
+    rows, two_late = [], 0
+    for seed in SEEDS:
+        s = start_fish(seed=seed, build=hop_dir)
+        assert s.peek(s.addr("fish_count")) == count and s.peek(s.addr("fish_n")) == count
+        cycles, longest, most, two = late_watch(s, 6000)
+        two_late += two
+        c = counters(s)
+        rows.append(f"seed {seed:04X}: late_max {c['late_max']}, late {c['late']} of {c['hops']} "
+                    f"({c['late'] / c['hops']:.1%}), early {c['early']}, two ticks late {two}, "
+                    f"longest late run {longest} ticks, most overdue {most}, worst step {max(cycles)}")
+        assert max(cycles) < HARD, rows[-1]
+        if hop_size == 4:
+            assert c["late_max"] <= 2 and c["late"] <= 0.01 * c["hops"], rows[-1]
+        else:
+            assert most < 60, rows[-1]
+    print(f"\n{hop_size}-dot, {count} creatures:\n" + "\n".join(rows))
+    if hop_size == 4:
+        assert two_late <= 3, two_late
+    for seed in SEEDS[:3]:
+        s = start_fish(seed=seed, build=hop_dir)
+        compared = 0
+        for step in range(3000):
+            s.step()
+            if s.peek(s.addr("fish_pending")) == 0 and bg_idle(s):
+                assert fishref.fish_bg(s) == fishref.expected_bg(s), (hex(seed), step)
+                assert s.page_bytes(PAGE1) == fishref.expected_page(s), (hex(seed), step)
+                compared += 1
+        assert compared >= 300, (hex(seed), compared)
+
+
 def test_counts_table(hop_dir, hop_size):
     """Printed for Task 9: late, early, worst and median step at counts 3-6
     in this build (2 seeds x 2,000 steps); every step fits its tick at every
@@ -2549,8 +2621,9 @@ def test_second_run_starts_clean(hop_dir, hop_size):
 def test_fallback_pad(hop_dir):
     """Without a vertical blank (ST_TIMING = 0) a step pads itself (st_pad):
     16 cycles a unit left and 2 a unit of STEP_UNITS, so the typical step
-    with the randomizer's overhead lands within 10% of a tick
-    (test_fallback_pacing holds the period); with the blank it doesn't."""
+    with the randomizer's overhead lands near a tick (test_fallback_pacing
+    and tests/mame/fish_rate.lua hold the period); with the blank it
+    doesn't."""
     s = start_fish(seed=0x1357, build=hop_dir)
     a = s.addr
     units = a("STEP_UNITS")
@@ -2569,7 +2642,10 @@ def test_fallback_pad(hop_dir):
         if not mode:                        # (a call spends under its charge: see st_pad)
             median = sorted(padded)[100]
             print(f"\npadded steps: median {median}, least {min(padded)}, most {max(padded)} (a tick {TICK})")
-            assert TICK * 0.9 <= median + OVERHEAD <= TICK * 1.1, median
+            # The period is the step plus step_once's own work (up to about 1,200 cycles: the
+            # beat, the key check, TICKS); Review Focus 5's band on the period is -17%..+22%, and
+            # tests/mame/fish_rate.lua measures the real period on the IIe (+6% at 3 creatures).
+            assert TICK * 0.83 - 1200 <= median <= TICK * 1.22, median
 
 
 def cycles_to(s, entry, stop, paid, x=0):

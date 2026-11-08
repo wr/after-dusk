@@ -4,12 +4,15 @@
 #   FX_TICKS=120 OUT=build/AFTERDUSK-test.dsk ./build.sh   (short effects, for tests)
 #   FISH_HOP=4 BUILD_DIR=build/hop4 ./build.sh   Fish! with 4-dot hops (2 is the
 #                                    default); BUILD_DIR keeps the files apart
+#   ONLY_FX=14 OUT=build/FISH-A-2DOT.dsk ./build.sh   a trial disk that shows one
+#                                    effect from power-on (default -1: all of them)
 # Needs ca65/ld65 on PATH and tools/bootstrap.sh run once (dos33fsprogs, venv).
 set -euo pipefail
 cd "$(dirname "$0")"
 
 FX_TICKS="${FX_TICKS:-10800}"
 FISH_HOP="${FISH_HOP:-2}"
+ONLY_FX="${ONLY_FX:--1}"
 BUILD_DIR="${BUILD_DIR:-build}"
 OUT="${OUT:-$BUILD_DIR/AFTERDUSK.dsk}"
 DOS33FSPROGS="${DOS33FSPROGS:-.tools/dos33fsprogs}"
@@ -36,7 +39,7 @@ done
 objs=()
 for src in src/main.s $(ls src/*.s | grep -v '^src/main.s$'); do
   o="$OBJ/$(basename "$src" .s).o"
-  ca65 --cpu 65C02 -g -I src -D FX_TICKS="$FX_TICKS" -D FISH_HOP="$FISH_HOP" -o "$o" "$src"
+  ca65 --cpu 65C02 -g -I src -D FX_TICKS="$FX_TICKS" -D FISH_HOP="$FISH_HOP" -D ONLY_FX="$ONLY_FX" -o "$o" "$src"
   objs+=("$o")
 done
 ld65 -C "$OBJ/after-dusk.cfg" -Ln "$BUILD_DIR/afterdusk.lbl" -m "$BUILD_DIR/afterdusk.map" -o "$BUILD_DIR/afterdusk.bin" "${objs[@]}"

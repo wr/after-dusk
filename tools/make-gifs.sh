@@ -8,7 +8,7 @@ set -eu
 cd "$(dirname "$0")/.."
 [ -d .tools/roms/apple2c ] || { echo "no emulator ROMs in .tools/roms (see tests/README.md)"; exit 1; }
 ids=("$@")
-[ ${#ids[@]} -gt 0 ] || ids=(0 1 2 3 4 5 6 7 8 9 10 11 12 13)
+[ ${#ids[@]} -gt 0 ] || ids=(0 1 2 3 4 5 6 7 8 9 10 11 12 13 14)
 
 record() {
   local id=$1 d=build/mame/movie/fx$1
