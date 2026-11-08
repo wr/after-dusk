@@ -131,7 +131,7 @@ def fish_bg(s):
 # How each creature moves, by the Global Constraints (the approved sample).
 
 ROLE_SWIM, ROLE_TOP, ROLE_FLOOR, ROLE_LOW, ROLE_RISE = 0, 1, 2, 3, 5
-HOP = 2                         # dots a swimmer moves, rows a Bubble rises (FISH_HOP: 2 or 4)
+HOP = 4                         # dots a swimmer moves, rows a Bubble rises (FISH_HOP: 4, the default build, or 2)
 
 
 class Rng:

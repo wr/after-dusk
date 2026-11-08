@@ -16,11 +16,12 @@
 
 .include "config.inc"
 
-; The hop size is a build setting: FISH_HOP=4 ./build.sh (ca65 -D FISH_HOP=4)
-; makes every swimmer move 4 dots and every Bubble rise 4 rows a hop, on beats
-; twice as long, so the speed is the same; the default is 2.
+; The hop size is a build setting (ca65 -D FISH_HOP): 4, the default, moves
+; every swimmer 4 dots and every Bubble 4 rows a hop on beats twice the
+; original's, the same speed in coarser steps (FISH_HOP=2 ./build.sh gives the
+; original's 2-dot hops; the IIc holds more creatures at 4).
 .ifndef FISH_HOP
-FISH_HOP = 2
+FISH_HOP = 4
 .endif
 .assert FISH_HOP = 2 || FISH_HOP = 4, error, "FISH_HOP must be 2 or 4"
 FISH_CYCLE = 30 * FISH_HOP      ; the step's load cycle in ticks: the beats

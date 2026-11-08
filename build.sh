@@ -2,16 +2,16 @@
 # Build After Dusk: assemble, link, and write the disk image.
 #   ./build.sh                       -> build/AFTERDUSK.dsk
 #   FX_TICKS=120 OUT=build/AFTERDUSK-test.dsk ./build.sh   (short effects, for tests)
-#   FISH_HOP=4 BUILD_DIR=build/hop4 ./build.sh   Fish! with 4-dot hops (2 is the
+#   FISH_HOP=2 BUILD_DIR=build/hop2 ./build.sh   Fish! with 2-dot hops (4 is the
 #                                    default); BUILD_DIR keeps the files apart
-#   ONLY_FX=14 OUT=build/FISH-A-2DOT.dsk ./build.sh   a trial disk that shows one
-#                                    effect from power-on (default -1: all of them)
+#   ONLY_FX=14 OUT=build/FISH.dsk ./build.sh   a disk that shows one effect from
+#                                    power-on (default -1: all of them)
 # Needs ca65/ld65 on PATH and tools/bootstrap.sh run once (dos33fsprogs, venv).
 set -euo pipefail
 cd "$(dirname "$0")"
 
 FX_TICKS="${FX_TICKS:-10800}"
-FISH_HOP="${FISH_HOP:-2}"
+FISH_HOP="${FISH_HOP:-4}"
 ONLY_FX="${ONLY_FX:--1}"
 BUILD_DIR="${BUILD_DIR:-build}"
 OUT="${OUT:-$BUILD_DIR/AFTERDUSK.dsk}"

@@ -215,7 +215,7 @@ def r(built):
     return s
 
 
-HOPS = (2, 4)           # FISH_HOP builds: dots a swimmer hops, rows a Bubble rises
+HOPS = (4, 2)           # FISH_HOP builds: dots a swimmer hops, rows a Bubble rises (4 is the default build)
 
 
 @pytest.fixture(scope="module", params=HOPS, ids=lambda h: f"hop{h}")
@@ -604,7 +604,7 @@ def test_background_job_survives_creature_rects(r):
 SPIKE = {"sea": 7500, "floor": 12200, "cross2": 12300, "cross3": 13500}   # the spike's per-hop costs
 
 
-def random_scene(rnd, hop=2):
+def random_scene(rnd, hop=fishref.HOP):
     """1-10 creatures: both facings, over the floor, Seaweed, at the edges,
     Bubbles above the top and on the floor."""
     specs = []

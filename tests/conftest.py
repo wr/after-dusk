@@ -32,8 +32,8 @@ def labels(path=None):
 
 def hop_build(hop):
     """The build directory for Fish! with `hop`-dot hops: build/ for the
-    default 2, build/hop4/ (built on first use, files apart) for 4."""
-    if hop == 2:
+    default 4, build/hop2/ (built on first use, files apart) for 2."""
+    if hop == 4:
         return BUILD
     path = BUILD / f"hop{hop}"
     subprocess.run(["./build.sh"], cwd=ROOT, check=True, capture_output=True, text=True,
