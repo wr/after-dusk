@@ -1,4 +1,5 @@
 """Shared checks for the effects."""
+from conftest import BUILD
 from sim import PAGE1, PAGE2, ST_FX, ST_TIMING, Sim
 
 NFX = 15                        # effects (fx_count)
@@ -24,7 +25,7 @@ def start(fx, seed=0x4D2A, prepare=None, build=None):
     """A Sim set up as After Dusk is after start-up (effects in aux memory,
     sprites and tables built), with effect `fx` loaded and initialised as the
     randomizer would. `build` is the build directory (default: build/)."""
-    s = Sim(**({"build": build} if build else {})).load_effects()
+    s = Sim(build=build or BUILD).load_effects()
     s.poke(ST_TIMING, 0)
     s.mem.ram[0xFFFA:0x10000] = bytes(6)
     s.call("sprite_setup", max_cycles=3_000_000)

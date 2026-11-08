@@ -26,6 +26,7 @@ FISH_CYCLE = 30 * FISH_HOP      ; the step's load cycle in ticks: the beats
 
 .export fish_init, fish_step
 .export FISH_BG, FISH_CODE2, FISH_SHT, FISH_REV, FISH_IREV, FLOOR_TOP
+.export FISH_HOP, FISH_CYCLE
 .export fish_n, fish_kind, fish_frame, fish_dir, fish_xl, fish_xh, fish_yl, fish_yh
 .export FISH_MAX, fish_box, fish_rect_begin, fish_rect_rows, fish_bg_begin, fish_bg_rows
 .export fish_bg_floor
@@ -265,9 +266,10 @@ mv_dxh:   .byte >FISH_HOP, >-FISH_HOP
 
 ; fish_spawn: X = slot, A = 1 to place it anywhere (init), 0 for a newcomer.
 ; Picks its kind (all 14 alike), frame, beat (4, 4, 5 or 6 ticks, twice
-; that for 4-dot hops; Bubbles 3, or 6), heading (swimmers only; the rest face right) and place by its band. A
-; newcomer swimmer enters just off a side, facing in (x = -w heading right,
-; 280 heading left); a newcomer Bubble 4 rows above the floor. x anywhere:
+; that for 4-dot hops; Bubbles 3, or 6), heading (swimmers only; the rest
+; face right) and place by its band. A newcomer swimmer enters just off a
+; side, facing in (x = -w heading right, 280 heading left); a newcomer Bubble
+; 4 rows above the floor. x anywhere:
 ; 0..280-w (Bubbles 4..280-w-4). A Seaweed also gets its life ((20 +
 ; rng_below(21)) * 60 ticks) and a sway count to start from (0-89); a
 ; newcomer Seaweed queues its box for the background job. Keeps X; never
@@ -413,13 +415,12 @@ fish_rnd:
 ; its frames swap; a Bubble rises FISH_HOP rows; the rest turn round 1 time in
 ; 42 (rng_below(42) = 0), then move FISH_HOP dots the way they face. One that
 ; has gone (a swimmer once x < -w-FISH_HOP or x > 280+FISH_HOP, a Bubble once
-; y < -h) is
-; replaced by a newcomer (fish_spawn, A = 0). Leaves the rect to redraw in
-; FR_C0..FR_R1 and carry set, or carry clear if none of it shows: the old
-; box joined with the new one, clipped (at most 8 bytes wide). For one that
-; has gone, its old box if that still shows (a Bubble's last row can), else
-; the newcomer's (a Bubble, at row 152); when both show, the newcomer's box
-; goes on the queue. A newcomer Seaweed queues its own box. Keeps X.
+; y < -h) is replaced by a newcomer (fish_spawn, A = 0). Leaves the rect to
+; redraw in FR_C0..FR_R1 and carry set, or carry clear if none of it shows:
+; the old box joined with the new one, clipped (at most 8 bytes wide). For
+; one that has gone, its old box if that still shows (a Bubble's last row
+; can), else the newcomer's (a Bubble, at row 152); when both show, the
+; newcomer's box goes on the queue. A newcomer Seaweed queues its own box. Keeps X.
 fish_hop:
         jsr fish_box            ; the old box
         ror MV_OV
@@ -706,7 +707,7 @@ fish_place:
         bra @draw
 @done:  rts
 
-; How many creatures fish_init places (Task 6 sets it; tests poke it).
+; How many creatures fish_init places (Task 9 sets it; tests poke it).
 fish_count: .byte 6
 
 ; ================================================================ the step
@@ -781,9 +782,14 @@ ST_P     = FISH_ZP_END + 17     ;   and the p being tried
 STEP_UNITS = 920                ; the tick's budget
 HOP_STAY   = 110                ; fish_hop, staying (1,720: facing left, clipped at the right)
 HOP_GONE   = 245                ;   gone and replaced (3,850)
-ARR_UNITS  = 340                ; renew: leaving and arriving (5,072; about
+ARR_UNITS  = 340 + 13 * (FISH_CYCLE - 60) / 6
+                                ; renew: leaving and arriving (5,072; about
                                 ;   5,200 at worst: beat 3 in and out, a Bubble's
-                                ;   rows, ten slots, the Seaweed count changing)
+                                ;   rows, ten slots, the Seaweed count changing),
+                                ;   at the 60-tick cycle; arrive and the walks
+                                ;   loop once per tick of the cycle: at 120 the
+                                ;   worst measured 7,163 cycles (a beat-8 fish in,
+                                ;   Bubbles out), charged 470 units = 7,520
 WEED_TICK  = 3                  ; fish_weed, a plain tick (39)
 WEED_SWAY  = 76                 ;   a sway (1,162)
 WEED_GONE  = 235                ;   gone and replaced (3,531)
