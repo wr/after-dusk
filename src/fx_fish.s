@@ -43,12 +43,13 @@ FISH_CYCLE = 30 * FISH_HOP      ; the step's load cycle in ticks: the beats
 .export fish_bgq_push, fish_bgq_pop, fish_bgq_reset, FISH_BGQ_MAX
 .export fish_bgq_n, fish_bgq_h, fish_bgq_c0, fish_bgq_c1, fish_bgq_r0, fish_bgq_r1
 .export MV_N, MV_V, FISH_ZP_END, FISH_MV_END
-.export fish_now, fish_now60, fish_duel, fish_dueh, fish_base60, fish_sbeat, fish_cost, fish_costh
-.export fish_w, fish_load, fish_pending, fish_late_max, fish_hops, fish_late, STEP_UNITS
+.export fish_now, fish_now60, fish_duel, fish_dueh, fish_base60, fish_sbeat
+.export fish_w, fish_load, fish_pending, fish_late_max, fish_hops, fish_late, fish_early, STEP_UNITS
 .export fish_bgq_peak, fish_bgq_over, fish_bg_busy, fish_bg_busy_max, fish_bgw, fish_bgr
-.export fish_newslot, st_lastw, FISH_ST_END, st_hop, st_weed, st_begin, st_worst, st_bg, renew, arrive
-.export st_pick, ST_NWEED, ST_BEGW, ST_BGMIN, ST_DONE, HOP_SCHED, HOP_STAY, HOP_GONE, ARR_UNITS
-.export WEED_TICK, WEED_SWAY, WEED_GONE, ST_BEGIN, ST_BEGPER, ST_BEGPASS, DRAW_MIN
+.export fish_newslot, st_lastw, FISH_ST_END, st_tick, st_after_pass, st_pad, st_hop, st_weed, st_arrive, st_begin
+.export st_worst, st_bg, renew, renew_weed, newcomer, arrive, st_late, st_due, st_next
+.export ST_NWEED, ST_NARR, ST_NL, ST_ND, ST_NN, ST_BEGW, ST_BGMIN, HOP_SCHED, HOP_STAY, HOP_GONE
+.export ARR_UNITS, EARLY_MIN, LEFT_MIN, WEED_TICK, WEED_SWAY, WEED_GONE, ST_BEGIN, ST_BEGPER, ST_BEGPASS, DRAW_MIN
 
 .import aux_fetch, aux_copy, vbl_poll, row_lo, row_hi, xbyte_lo, xbyte_hi, xmod_lo, xmod_hi
 .import rng_next, rng_below
@@ -602,10 +603,10 @@ fish_bgq_reset:
         bpl :-
         rts
 
-; fish_place: the rest of init. fish_count creatures placed anywhere, each
-; with its first due tick, FISH_BG built (the floor and every Seaweed), the
-; screen drawn: FISH_BG, then the box of each creature that isn't Seaweed.
-; Nothing queued.
+; fish_place: the rest of init. fish_count creatures placed anywhere (each
+; one that hops gets its beat from the step's first ticks: st_arrive), FISH_BG
+; built (the floor and every Seaweed), the screen drawn: FISH_BG, then the box
+; of each creature that isn't Seaweed. Nothing queued.
 fish_place:
         jsr fish_bgq_reset      ; nothing queued
         lda fish_count          ; fish_count creatures, anywhere
@@ -615,7 +616,7 @@ fish_place:
         bcs :+
         lda #1
         jsr fish_spawn
-        jsr arrive
+        jsr newcomer            ; (a Seaweed counted; the rest get their beats in the first ticks)
         inx
         bra @spawn
 :       jsr st_worst            ; (for the Seaweed count)
@@ -644,26 +645,39 @@ fish_place:
 fish_count: .byte 6
 
 ; ================================================================ the step
-; Every tick:
+; Every tick (st_tick):
 ;  1. now += 1 (now60 round the load cycle), and the tick's budget: FR_LEFT =
 ;     STEP_UNITS, in the renderer's units of 16 cycles.
-;  2. Every Seaweed's tick (fish_weed), even with a rect pending.
+;  2. One pass over the slots: every Seaweed's tick (st_weed, even with a
+;     rect pending), and every other creature sorted by when its hop is due:
+;     late, due this tick, or due next tick (st_late, st_due, st_next).
 ;  3. A creature rect left half drawn goes on; if it still doesn't finish,
 ;     that's the tick.
-;  4. Hops: the one due longest first (ties: the lowest slot), counted late
-;     by the ticks it waited, its next due tick a beat on from the planned
-;     one. After the first, a hop starts only if its estimate fits. A rect
-;     that doesn't finish is left pending, and that's the tick.
-;  5. Nothing more due: background work on what is left. The queue's next
-;     rect is rebuilt in FISH_BG (fish_bg_rows, over several ticks if need
-;     be), then redrawn on screen; a redraw that runs out is dropped and
-;     begun again from the row it reached, so it never leaves a rect
-;     pending. Then the next rect, while the budget lasts.
+;  4. Hops: the late ones first, then those due this tick (lowest slot
+;     first in each), while FR_LEFT pays for a hop at its worst and a begin.
+;     A late hop is counted by the ticks it waited; its next due tick is a
+;     beat on from the planned one. A rect that doesn't finish is left
+;     pending, and that's the tick.
+;  5. Newcomers awaiting their beat get it (st_arrive), while ARR_UNITS are
+;     left.
+;  6. The early start: hops due next tick, lowest slot first, while half a
+;     tick (EARLY_MIN) is left. An early hop is counted in fish_early, its
+;     next due stays a beat on from its planned tick, and its rect may run
+;     into its due tick, where it is finished first (a floor hop is more
+;     than a tick; started early it is done by the tick it was due).
+;  7. Background work on what is left. The queue's next rect is rebuilt in
+;     FISH_BG (fish_bg_rows, over several ticks if need be), then redrawn
+;     on screen; a redraw that runs out is dropped and begun again from the
+;     row it reached, so it never leaves a rect pending. Then the next rect,
+;     while the budget lasts.
 ; Every call is paid for from FR_LEFT before it runs (or, for a begin, from
-; room kept for its worst), by costs measured at their worst: no step runs
-; past its tick. Hops are spread over the load cycle, 60 ticks (120 for 4-dot
-; hops: beats 8 don't divide 60) as creatures arrive: fish_load sums each
-; tick's hop estimates. (The names say 60; FISH_CYCLE is the count.)
+; room kept for its worst), by costs measured at their worst, and the
+; step's own work between the calls is counted into STEP_UNITS: no step
+; runs past its tick. Without a vertical blank (the enhanced IIe) fish_step
+; then waits 16 cycles for each unit left, so a step takes about a tick.
+; Hops are spread over the load cycle, 60 ticks (120 for 4-dot hops: beats
+; 8 don't divide 60) as creatures arrive: fish_load sums each tick's hop
+; estimates. (The names say 60; FISH_CYCLE is the count.)
 
 ; ---- the step's state, after the motion state ----
 fish_now60  = FISH_MV_END       ; now mod FISH_CYCLE (60 or 120)
@@ -671,16 +685,19 @@ fish_duel   = fish_now60 + 1    ; 10 each: the tick its next hop is due,
 fish_dueh   = fish_duel + FISH_MAX
 fish_base60 = fish_dueh + FISH_MAX      ;   that mod the cycle when it arrived,
 fish_sbeat  = fish_base60 + FISH_MAX    ;   its beat then (fish_load's spacing),
-fish_cost   = fish_sbeat + FISH_MAX     ;   its hop's estimate (units),
-fish_costh  = fish_cost + FISH_MAX
-fish_w      = fish_costh + FISH_MAX     ;   and its weight in fish_load (0: none)
-ST_CLEAR    = fish_w + FISH_MAX ; from here to ST_CLEAR_END, zeroed by init:
+fish_w      = fish_sbeat + FISH_MAX     ;   and its weight in fish_load (0: a Seaweed, or a
+                                        ;   newcomer still awaiting its beat)
+st_late     = fish_w + FISH_MAX ; 10 each (st_tick's pass): the slots whose hops are late,
+st_due      = st_late + FISH_MAX        ;   due this tick, and due next tick, highest slot
+st_next     = st_due + FISH_MAX         ;   first (they are taken from the end)
+ST_CLEAR    = st_next + FISH_MAX ; from here to ST_CLEAR_END, zeroed by init:
 fish_load   = ST_CLEAR          ; FISH_CYCLE: weights of the hops due on each tick mod it
 fish_pending = fish_load + FISH_CYCLE   ; 1 while a creature rect is half drawn
 fish_late_max = fish_pending + 1        ; the latest any hop has been (ticks)
 fish_hops   = fish_late_max + 1 ; 2: hops,
-fish_late   = fish_hops + 2     ; 2: and how many were late
-fish_bgq_peak = fish_late + 2   ; the most rects ever queued at once
+fish_late   = fish_hops + 2     ; 2: how many were late,
+fish_early  = fish_late + 2     ; 2: and how many started a tick early
+fish_bgq_peak = fish_early + 2  ; the most rects ever queued at once
 fish_bgq_over = fish_bgq_peak + 1       ; 2: times the queue overflowed
 fish_bg_busy = fish_bgq_over + 2        ; 2: ticks in a row with background
 fish_bg_busy_max = fish_bg_busy + 2     ; 2: work waiting, and the most
@@ -694,40 +711,50 @@ FISH_ST_END = st_lastw + 1
 
 ; ---- zero page, after the motion's ----
 fish_now = FISH_ZP_END          ; 2: ticks since init
-ST_DONE  = FISH_ZP_END + 2      ; hops started this tick
-ST_NWEED = FISH_ZP_END + 3      ; Seaweed slots
-ST_BEST  = FISH_ZP_END + 4      ; st_pick: the latest so far, and its slot
-ST_BSL   = FISH_ZP_END + 5
-ST_BEGW  = FISH_ZP_END + 6      ; 2: a begin at its worst,
-ST_BGMIN = FISH_ZP_END + 8      ; 2: and one useful background call
-ST_M     = FISH_ZP_END + 10     ; scratch: madd, walk_max
-ST_B     = FISH_ZP_END + 11     ; arrive: beat, weight, a walk's start,
-ST_W     = FISH_ZP_END + 12
-ST_T     = FISH_ZP_END + 13
-ST_BM    = FISH_ZP_END + 14     ;   the quietest busiest tick, its tick and p,
-ST_BT    = FISH_ZP_END + 15
-ST_BP    = FISH_ZP_END + 16
-ST_P     = FISH_ZP_END + 17     ;   and the p being tried
+ST_NWEED = FISH_ZP_END + 2      ; Seaweed slots
+ST_NARR  = FISH_ZP_END + 3      ; newcomers awaiting their beat (fish_w = 0, not Seaweed)
+ST_NL    = FISH_ZP_END + 4      ; how many slots st_late, st_due and st_next hold
+ST_ND    = FISH_ZP_END + 5
+ST_NN    = FISH_ZP_END + 6
+ST_BEGW  = FISH_ZP_END + 7      ; 2: a begin at its worst,
+ST_BGMIN = FISH_ZP_END + 9      ; 2: and one useful background call
+ST_M     = FISH_ZP_END + 11     ; scratch: madd, walk_max
+ST_B     = FISH_ZP_END + 12     ; arrive: beat, weight, a walk's start,
+ST_W     = FISH_ZP_END + 13
+ST_T     = FISH_ZP_END + 14
+ST_BM    = FISH_ZP_END + 15     ;   the quietest busiest tick, its tick and p,
+ST_BT    = FISH_ZP_END + 16
+ST_BP    = FISH_ZP_END + 17
+ST_P     = FISH_ZP_END + 18     ;   and the p being tried
 .assert ST_P < $80, error, "the step's zero page runs past $7F"
 
 ; ---- costs, units of 16 cycles (measured worst cycles in brackets) ----
-STEP_UNITS = 920                ; the tick's budget
-HOP_SCHED  = 54                 ; the step's own work for a hop: st_pick over the slots (about
-                                ;   45 a slot when due: 480 with ten), may_go, afford_t and
-                                ;   st_hop's own (about 360): 792 measured with ten, 840 by count
-HOP_STAY   = 110 + HOP_SCHED    ; and fish_hop, staying (fish_box, the move, fish_locate)
-HOP_GONE   = 245 + HOP_SCHED    ;   or gone and replaced
-ARR_UNITS  = 340 + 13 * (FISH_CYCLE - 60) / 6
-                                ; renew: leaving and arriving (5,072; about
-                                ;   5,200 at worst: beat 3 in and out, a Bubble's
-                                ;   rows, ten slots, the Seaweed count changing),
-                                ;   at the 60-tick cycle; arrive and the walks
-                                ;   loop once per tick of the cycle: at 120 the
-                                ;   worst measured 7,163 cycles (a beat-8 fish in,
-                                ;   Bubbles out), charged 470 units = 7,520
-WEED_TICK  = 3                  ; fish_weed, a plain tick (39)
-WEED_SWAY  = 76                 ;   a sway (1,162)
-WEED_GONE  = 235                ;   gone and replaced (3,531)
+STEP_UNITS = 960                ; the tick's budget: 15,360 cycles, and the step's own work
+                                ;   between the calls at its worst by count (1,149: the clock,
+                                ;   the pass over ten slots due next tick, six list pops, a hop
+                                ;   and a beat refused, the background entry; tests measure each
+                                ;   piece and allow 1,200) is 16,560 of the 16,730 a step may
+                                ;   take, 170 spare for what the count misses
+EARLY_MIN  = STEP_UNITS / 2     ; an early hop needs half a tick left: it draws at least
+                                ;   half its rect in its own tick
+PAD_ROUNDS = STEP_UNITS / 5     ; st_pad: 2 cycles a unit of STEP_UNITS, in two loops of 5
+.assert PAD_ROUNDS <= 255, error, "st_pad's loops count in a byte"
+HOP_SCHED  = 21                 ; st_hop's own work for a hop (may_go, the sums and afford_t,
+                                ;   the counting, the charges: 297-303 measured, 3,000 hops)
+HOP_STAY   = 110 + HOP_SCHED    ; and fish_hop, staying (1,720: a left-facing fish clipped at
+                                ;   the right edge)
+HOP_GONE   = 344 + HOP_SCHED    ;   or gone and replaced (fish_hop 3,920 at its worst) and
+                                ;   renew (1,582: the leaver's weight off 20 ticks of fish_load,
+                                ;   a Bubble's beat; a newcomer Seaweed counted and st_worst);
+                                ;   4,519 measured whole
+ARR_UNITS  = 260 + 13 * (FISH_CYCLE - 60) / 6
+                                ; st_arrive: a newcomer's beat (fish_est, walk_max over the
+                                ;   cycle for each p of its beat, its weight added): 3,862 at
+                                ;   the 60-tick cycle (charged 4,160), 5,932 at 120 (6,240)
+WEED_TICK  = 9                  ; st_weed whole, a plain tick (137: fish_weed's 39 and its own)
+WEED_SWAY  = 68                 ;   a sway (1,052)
+WEED_GONE  = 262                ;   gone and replaced (4,073: fish_weed's spawn, a newcomer
+                                ;   Seaweed's life and count, or a hopper's wait)
 ST_BEGIN   = 11                 ; st_begin: fish_rect_begin (its poll and set-up), its
                                 ;   own sums and charge (139 here; 160 with a IIc's latch poll
                                 ;   at its slowest: a blank pending and FRAMES wrapping)
@@ -742,6 +769,7 @@ BG_WEED    = FC_BGPER + FC_EVPER + FC_EVACT + FC_PATCH + 4 * FC_PATCHCOL + 12
 LEFT_MIN   = 120                ; with less left, nothing more can start (a background
                                 ;   call with less than BG_FIX pays its call and does nothing)
 .assert LEFT_MIN <= HOP_STAY + ST_BEGIN + ST_BEGPER, error, "LEFT_MIN: a hop needs less"
+.assert EARLY_MIN >= HOP_GONE + ST_BEGIN + FISH_MAX * ST_BEGPER, error, "an early hop with EARLY_MIN left is always affordable"
 ; A run's start is paid in one piece (its scan, then the kernel's set-up and
 ; every layer's patching), so the dearest (10 layers: 4 passes) must fit a
 ; tick's budget with the call that brings it, for a creature rect and for the
@@ -752,7 +780,39 @@ RUN_WORST = FC_EVENT + 10 * (FC_EVPER + FC_EVACT) + FC_MANY + 1 + 10 * FC_MLAYER
 .assert FC_BGCALL + RUN_WORST <= STEP_UNITS, error, "a background run of 10 Seaweed can't start in a tick"
 .assert FC_ROWS + FC_ROWFLR + FC_PART + (67 + RC_MPFIX + 4 * (RC_MPPASS + 8 * RC_MPBYTE) + 8 + 15) / 16 <= STEP_UNITS, error, "a row of 10 layers can't be drawn in a tick"
 
+; fish_step: the tick (st_tick); then, without a vertical blank (the
+; cycle-counted fallback), the wait that makes a step about a tick whatever
+; it did (fx_slow for Fish! is 0).
 fish_step:
+        jsr st_tick
+        lda ST_TIMING
+        beq st_pad
+        rts
+
+; st_pad: 16 cycles for each unit left in FR_LEFT and 2 for each unit spent:
+; 2 a unit of STEP_UNITS first (two loops of 5 x PAD_ROUNDS), then 14 a unit
+; left (the load, its branch, the count and the branch back; 9 more once in
+; 256, when the high byte lends). The charges are worst cases, and a tick's
+; calls spend about 86% of theirs (measured over 200 steps: padded at 16 a
+; unit left alone, the typical step came 20% short of a tick), so the 2 a
+; unit spent brings the typical padded step within 10% of a tick, the
+; dearest about 4% over (the period only: without a blank no frame slips).
+st_pad: ldy #PAD_ROUNDS
+:       dey
+        bne :-
+        ldy #PAD_ROUNDS
+:       dey
+        bne :-
+@l:     lda FR_LEFT
+        bne @lo
+        lda FR_LEFT+1
+        beq @done
+        dec FR_LEFT+1
+@lo:    dec FR_LEFT
+        bra @l
+@done:  rts
+
+st_tick:
         inc fish_now            ; 1. the clock
         bne :+
         inc fish_now+1
@@ -785,41 +845,95 @@ fish_step:
         sta FR_LEFT
         lda #>STEP_UNITS
         sta FR_LEFT+1
-        stz ST_DONE
-        ldx fish_n              ; 2. every Seaweed's tick (fish_w = 0)
-        bra @nw
-@weed:  lda fish_w,x
-        bne @nw
+        stz ST_NL               ; 2. one pass: Seaweed ticks, the rest sorted by their due
+        stz ST_ND
+        stz ST_NN
+        ldx fish_n
+        bra @nx
+@slot:  lda sl_weed,x
+        beq @hopper
         jsr st_weed
-@nw:    dex
-        bpl @weed
+        bra @nx
+@hopper:
+        lda fish_w,x            ; (a newcomer awaiting its beat has no due yet)
+        beq @nx
+        lda fish_now            ; now - due
+        sec
+        sbc fish_duel,x
+        tay
+        lda fish_now+1
+        sbc fish_dueh,x
+        bcc @notyet
+        bne @late               ; 256 or more
+        tya
+        beq @due
+@late:  ldy ST_NL
+        txa
+        sta st_late,y
+        inc ST_NL
+        bra @nx
+@due:   ldy ST_ND
+        txa
+        sta st_due,y
+        inc ST_ND
+        bra @nx
+@notyet:
+        cmp #$FF                ; -1: due next tick
+        bne @nx
+        cpy #$FF
+        bne @nx
+        ldy ST_NN
+        txa
+        sta st_next,y
+        inc ST_NN
+@nx:    dex
+        bpl @slot
+st_after_pass:                  ; (the tests measure the pass)
         lda fish_pending        ; 3. a rect left half drawn
-        beq @hop
+        beq @lates
         jsr fish_rect_rows
         bcc @rts
         stz fish_pending
-@hop:   jsr st_pick             ; 4. the hops due
-        bmi st_bg               ; none: 5.
-        ldy ST_DONE
-        beq :+
-        pha
-        lda FR_LEFT             ; after the first, only one that fits
-        cmp fish_cost,x
-        lda FR_LEFT+1
-        sbc fish_costh,x
-        pla
-        bcc @rts
-:       jsr st_hop
-        bcc @rts
-        lda FR_LEFT+1           ; too little left for any hop or background
-        bne @hop                ; call: done
-        lda FR_LEFT
-        cmp #LEFT_MIN
-        bcs @hop
+@lates: ldy ST_NL               ; 4. the hops late, then those due
+        beq @dues
+        dey
+        sty ST_NL
+        ldx st_late,y
+        jsr st_hop
+        bcs @lates
+        rts
+@dues:  ldy ST_ND
+        beq @arr
+        dey
+        sty ST_ND
+        ldx st_due,y
+        jsr st_hop
+        bcs @dues
+        rts
+@arr:   lda ST_NARR             ; 5. newcomers awaiting their beat
+        beq @early
+        jsr st_arrive
+        bcs @arr
+@early: lda #<EARLY_MIN          ; 6. hops due next tick, while half a tick is left
+        ldy #>EARLY_MIN
+        jsr afford
+        bcc st_bg
+        ldy ST_NN
+        beq st_bg
+        dey
+        sty ST_NN
+        ldx st_next,y
+        jsr st_hop
+        bcs @early
 @rts:   rts
 
-; st_bg: nothing more is due. Background work: the next queued rect rebuilt
-; in FISH_BG, then redrawn on screen, while FR_LEFT lasts.
+; st_bg: 7. background work: the next queued rect rebuilt in FISH_BG, then
+; redrawn on screen, while FR_LEFT lasts. ST_BGMIN (st_worst) is a call that
+; lists the Seaweed and draws a row with every one of them in it; a call
+; that then stops before a Seaweed cache build (up to 299 units) has paid
+; its listing for nothing, which is accepted: background work comes last,
+; so what it wastes nothing else wanted, and the next tick's call lists
+; again and builds.
 st_bg:  lda fish_bgw
         cmp #2
         beq @redraw
@@ -889,42 +1003,14 @@ is_weed:
         cmp #ROLE_STILL
         rts
 
-; st_pick: X = the slot whose hop has been due longest (due <= now; ties: the
-; lowest slot), A = the ticks it is late (at most 255), or X = $FF and N
-; set if none. Seaweed (fish_w = 0) never hops.
-st_pick:   lda #$FF
-        sta ST_BSL
-        stz ST_BEST
-        ldx fish_n
-        bra @nx
-@slot:  lda fish_w,x
-        beq @nx
-        lda fish_now            ; late by now - due
-        sec
-        sbc fish_duel,x
-        tay
-        lda fish_now+1
-        sbc fish_dueh,x
-        bcc @nx                 ; not due yet
-        beq :+
-        ldy #$FF                ; (256 or more)
-:       cpy ST_BEST
-        bcc @nx
-        sty ST_BEST
-        stx ST_BSL
-@nx:    dex
-        bpl @slot
-        lda ST_BEST
-        ldx ST_BSL
-        rts
-
-; st_hop: X = a slot that is due, A = the ticks it is late. If FR_LEFT
-; pays for its hop at its worst and a begin: it is counted, its next hop is
-; due a beat on from this one, it hops, and its rect is drawn on what is
-; left. Carry set to go on; clear to end the tick (no budget for it, or its
-; rect left pending).
-st_hop: pha
-        jsr may_go              ; its hop at its worst, and a begin
+; st_hop: X = a slot whose hop is due (late, this tick, or next tick for an
+; early start). If FR_LEFT pays for its hop at its worst and a begin: it is
+; counted (late by now - due; early when that is -1), its next hop is due a
+; beat on from the planned tick, it hops, and its rect is drawn on what is
+; left. Carry set to go on; clear to end the tick (no budget for the hop,
+; its rect left pending, or less than LEFT_MIN left: nothing more can
+; start).
+st_hop: jsr may_go              ; its hop at its worst, and a begin
         clc
         adc ST_BEGW
         sta RD_T
@@ -932,20 +1018,31 @@ st_hop: pha
         adc ST_BEGW+1
         sta RD_T+1
         jsr afford_t
-        ply
         bcc @rts
-        tya                     ; counted
+        lda fish_now            ; counted: late by now - due
+        sec
+        sbc fish_duel,x
+        tay
+        lda fish_now+1
+        sbc fish_dueh,x
+        bcc @early              ; -1: a tick early
+        beq :+
+        ldy #$FF                ; (256 or more)
+:       tya
+        beq @hops
         cmp fish_late_max
         bcc :+
         sta fish_late_max
-:       inc fish_hops
+:       inc fish_late
+        bne @hops
+        inc fish_late+1
+        bra @hops
+@early: inc fish_early
+        bne @hops
+        inc fish_early+1
+@hops:  inc fish_hops
         bne :+
         inc fish_hops+1
-:       tya
-        beq :+
-        inc fish_late
-        bne :+
-        inc fish_late+1
 :       lda fish_duel,x         ; the next, a beat on from the planned tick
         clc
         adc fish_beat,x
@@ -960,12 +1057,10 @@ st_hop: pha
         php
         cpx fish_newslot        ; gone, and a newcomer in its place
         bne :+
-        lda #<(HOP_GONE + ARR_UNITS - HOP_STAY)
-        ldy #>(HOP_GONE + ARR_UNITS - HOP_STAY)
-        jsr charge_ay
+        lda #HOP_GONE - HOP_STAY
+        jsr charge_a
         jsr renew
-:       inc ST_DONE
-        plp
+:       plp
         bcc @on                 ; nothing shows
         jsr st_begin
         jsr fish_rect_rows
@@ -973,13 +1068,18 @@ st_hop: pha
         inc fish_pending        ; on with it next tick
         clc
 @rts:   rts
-@on:    sec
+@on:    lda FR_LEFT+1           ; with less than LEFT_MIN left, nothing more can start
+        bne @go
+        lda FR_LEFT
+        cmp #LEFT_MIN
+        bcc @rts
+@go:    sec
         rts
 
 ; may_go: X = slot. A (low), Y (high) = its hop's cost at its worst:
-; HOP_GONE + ARR_UNITS if this hop may take it off (a swimmer at x < -w or
-; x > 280, whichever way it turns, for either hop size; a Bubble at
-; y + h < FISH_HOP), else HOP_STAY.
+; HOP_GONE if this hop may take it off (a swimmer at x < -w or x > 280,
+; whichever way it turns, for either hop size; a Bubble at y + h <
+; FISH_HOP), else HOP_STAY.
 may_go: ldy fish_kind,x
         lda fk_role,y
         cmp #ROLE_RISE
@@ -1006,24 +1106,24 @@ may_go: ldy fish_kind,x
         clc
         adc fk_cw,y
         bcs @stay
-@go:    lda #<(HOP_GONE + ARR_UNITS)
-        ldy #>(HOP_GONE + ARR_UNITS)
+@go:    lda #<HOP_GONE
+        ldy #>HOP_GONE
         rts
-@stay:  lda #HOP_STAY
-        ldy #0
+@stay:  lda #<HOP_STAY
+        ldy #>HOP_STAY
         rts
 
 ; st_weed: X = a Seaweed's slot. Its tick (fish_weed), paid for first by
 ; what it will do; if FR_LEFT can't pay, it waits a tick. A newcomer in its
-; place gets its beat (renew). Keeps X.
+; place is counted (renew_weed). Keeps X.
 st_weed:
         lda fish_lifeh,x        ; its life runs out this tick?
         bne @sway
         lda fish_lifel,x
         dec a
         bne @sway
-        lda #<(WEED_GONE + ARR_UNITS)
-        ldy #>(WEED_GONE + ARR_UNITS)
+        lda #<WEED_GONE
+        ldy #>WEED_GONE
         bra @pay
 @sway:  ldy #0                  ; or it sways
         lda fish_flip,x
@@ -1037,38 +1137,81 @@ st_weed:
         sta fish_newslot
         jsr fish_weed
         cpx fish_newslot
-        beq renew
+        beq renew_weed
 @rts:   rts
 
-; renew: X = a slot fish_spawn has just filled (in fish_hop or fish_weed).
-; The creature that left takes its weight off fish_load (a Seaweed has none:
-; one fewer), the newcomer arrives, and ST_BEGW and ST_BGMIN follow the
-; Seaweed count. Keeps X.
+; st_arrive: one newcomer awaiting its beat (ST_NARR > 0: the highest such
+; slot) gets it (arrive), paid for first by ARR_UNITS: carry set; carry
+; clear if FR_LEFT can't pay.
+st_arrive:
+        lda #<ARR_UNITS
+        ldy #>ARR_UNITS
+        jsr charge_ay
+        bcc @rts
+        ldx fish_n
+@slot:  dex
+        bmi @none
+        lda sl_weed,x
+        bne @slot
+        lda fish_w,x
+        bne @slot
+        jsr arrive
+        dec ST_NARR
+        sec
+@rts:   rts
+@none:  stz ST_NARR             ; (none after all: the count was wrong)
+        clc
+        rts
+
+; renew: X = a slot fish_spawn has just filled in fish_hop: the creature
+; that left takes its weight off fish_load; renew_weed: the same from
+; fish_weed, where it was a Seaweed (one fewer in ST_NWEED). Then the
+; newcomer: a Seaweed is counted (ST_NWEED, and ST_BEGW and ST_BGMIN follow
+; it); anything else waits for its beat (fish_w = 0, ST_NARR), which
+; st_arrive gives it in a tick with ARR_UNITS to spare. Keeps X.
 renew:  lda fish_w,x
-        bne :+
-        dec ST_NWEED
-        bra @in
-:       eor #$FF
+        eor #$FF
         inc a
         sta ST_W
         lda fish_sbeat,x
         sta ST_B
         ldy fish_base60,x
         jsr walk_add
-@in:    jsr arrive
+        bra newcomer
+renew_weed:
+        dec ST_NWEED
+newcomer:
+        stz fish_w,x
+        jsr is_weed
+        bne :+
+        inc ST_NWEED
         jmp st_worst
+:       inc ST_NARR
+        rts
 
 ; arrive: X = a slot just filled. A Seaweed never hops: no due tick, no
-; weight, one more in ST_NWEED. Anything else: its estimate (cost_of), then
-; its first hop due at now + 1 + p, p = 0..beat-1, the p whose busiest tick
-; in fish_load is the quietest (ties: the smallest p), and its weight on
-; every tick its hops fall on. Keeps X.
+; weight, one more in ST_NWEED. Anything else: its estimate (fish_est), its
+; weight (the estimate + 32) / 64, then its first hop due at now + 1 + p,
+; p = 0..beat-1, the p whose busiest tick in fish_load is the quietest
+; (ties: the smallest p), and its weight on every tick its hops fall on.
+; Keeps X.
 arrive: stz fish_w,x
         jsr is_weed
         bne :+
         inc ST_NWEED
         rts
-:       jsr cost_of
+:       jsr fish_est
+        lda RD_T                ; (estimate + 32) / 64
+        clc
+        adc #32
+        sta ST_T
+        lda RD_T+1
+        adc #0
+        asl ST_T
+        rol a
+        asl ST_T
+        rol a
+        sta fish_w,x
         lda fish_beat,x
         sta fish_sbeat,x
         sta ST_B
@@ -1155,6 +1298,7 @@ st_reset:
         stz fish_now+1
         stz fish_now60
         stz ST_NWEED
+        stz ST_NARR
         ldx #ST_CLEAR_END - ST_CLEAR
 :       stz ST_CLEAR-1,x
         dex
@@ -1165,12 +1309,14 @@ st_reset:
 
 ; st_worst: when the Seaweed count changes, ST_BEGW (a begin: ST_BEGIN and
 ; ST_BEGPER per slot) and ST_BGMIN (a useful background call: the call,
-; listing the slots, a row with every Seaweed in it).
+; listing the slots, a row with every Seaweed in it). Keeps X (its callers
+; are in the middle of a pass over the slots).
 st_worst:
         lda ST_NWEED
         cmp st_lastw
         beq @rts
         sta st_lastw
+        phx
         ldy #2                  ; ST_BGMIN, then ST_BEGW
 @sum:   lda w_base,y
         sta RD_T
@@ -1191,6 +1337,7 @@ st_worst:
         dey
         dey
         bpl @sum
+        plx
 @rts:   rts
 w_base:  .byte ST_BEGIN, 0, BG_FIX
 w_weed:  .byte ST_BEGPER, 0, BG_WEED
@@ -1224,25 +1371,6 @@ st_begin:
         jmp charge_a
 .assert ST_BEGPER - ST_BEGPASS = 3, error, "st_begin adds 3 a listed slot"
 .assert FC_BGPER - FC_BGANY = 5, error, "fish_bg_rows adds 5 a Seaweed slot"
-
-; cost_of: X = slot. Its hop's estimate in units (fish_cost, fish_costh):
-; fish_est's. fish_w = the estimate / 64, rounded. Keeps X.
-cost_of:
-        jsr fish_est
-        lda RD_T
-        sta fish_cost,x
-        clc
-        adc #32
-        sta ST_T
-        lda RD_T+1
-        sta fish_costh,x
-        adc #0
-        asl ST_T                ; (cost + 32) / 64
-        rol a
-        asl ST_T
-        rol a
-        sta fish_w,x
-        rts
 
 ; The art's tables, frames and floor (generated). Last: it changes segments.
 .include "fish_art.inc"

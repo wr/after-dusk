@@ -110,16 +110,11 @@ def test_key_ends_effect(s):
     assert s.carry()
 
 
-# Fish! (14) steps every tick: whole-tick waits can't pace its step (about
-# two thirds of a tick of work) within 25%. Task 6 sets its pacing.
-FISH_PACING = pytest.mark.xfail(strict=True, reason="Task 6: Fish!'s fx_slow and fallback pacing")
-
-
-@pytest.mark.parametrize("fx", [pytest.param(fx, marks=FISH_PACING) if fx == 14 else fx
-                                for fx in range(NFX)])
+@pytest.mark.parametrize("fx", range(NFX))
 def test_fallback_pacing(built, fx):
     """Without vertical blank, a step (work plus wait) still takes about its
-    ticks, and TICKS still counts its ticks."""
+    ticks, and TICKS still counts its ticks. (Fish!, which steps every tick,
+    pads its own step to a tick instead of waiting whole ones: fx_slow 0.)"""
     from fxcommon import fx_entry
     from fxcommon import start as fx_start
     s = fx_start(fx)

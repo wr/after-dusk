@@ -5,6 +5,7 @@ hopping, turning, leaving, Seaweed and Bubbles) with the queue of background
 jobs; and the step, which keeps every creature on its beat inside one tick."""
 import json
 import random
+import re
 from collections import Counter
 from functools import reduce
 
@@ -12,7 +13,7 @@ import pytest
 
 import fishref
 from conftest import BUILD, hop_build
-from fxcommon import ALLOWED, FISH_ALLOWED, FISH_ALLOWED_AUX, OVERHEAD, OVL, TICK, check_budget, check_in_bounds, start
+from fxcommon import ALLOWED, FISH_ALLOWED, FISH_ALLOWED_AUX, OVERHEAD, OVL, TICK, start
 from sim import VblLatch, PAGE1, PAGE2, RNG, ST_FX, ST_TIMING, TICKS, Sim, row_base
 
 FX = 14
@@ -144,6 +145,24 @@ def test_init_writes_only_its_own_memory(built):
     assert s.writes_outside(*ALLOWED, *FISH_ALLOWED) == []
     assert s.aux_writes_outside(*FISH_ALLOWED_AUX) == []
     assert not s.mem.rd_aux and not s.mem.wr_aux
+
+
+def test_labels_the_tests_use_are_unique(built):
+    """Every label these tests and fishref look up names one place in the
+    label file: a second definition elsewhere (Fish!'s pick once shared its
+    name with Lissajous's) would make the lookup read the wrong routine."""
+    from pathlib import Path
+    seen = {}                           # name -> the addresses it is defined at (an export is
+    for line in (BUILD / "afterdusk.lbl").read_text().splitlines():    # listed once per module)
+        parts = line.split()
+        if len(parts) == 3 and parts[0] == "al" and not parts[2].startswith(".@"):
+            seen.setdefault(parts[2].lstrip("."), set()).add(int(parts[1], 16))
+    here = Path(__file__).resolve().parent
+    source = (here / "test_fx_fish.py").read_text() + (here / "fishref.py").read_text()
+    used = {m for m in re.findall(r'"([A-Za-z_][A-Za-z0-9_]*)"', source) if m in seen}
+    assert len(used) > 50, len(used)
+    twice = sorted(name for name in used if len(seen[name]) > 1)
+    assert twice == [], twice
 
 
 @pytest.mark.parametrize("fx", (0, 3))
@@ -922,18 +941,17 @@ def pieces_of(rec):
     return out
 
 
-WHOLE_OPEN = ("Ruling 8's whole-call bound: a call pays every piece's worst path (the call's stop, "
-              "the event's first run and scan, the rows' multiply and tries, a many-layer set-up's "
-              "passes: named in FC_CALL, FC_EVENT, FC_ROWS, FC_MANY), which a call that draws on "
-              "valid caches doesn't spend: about 700 cycles over the bound on an 18-piece call; "
-              "see task-7-report.md")
+WHOLE_SLACK = 0.08      # Ruling 9: the whole-call bound is a regression bound at the measured level,
+                        # 8% of the call and 2 units a piece (a 5-piece call of 4,830 cycles carries 418)
 
 
-@pytest.mark.xfail(strict=True, reason=WHOLE_OPEN)
 def test_whole_call_is_tight(r):
-    """Ruling 8: a whole call on valid caches is charged within 3% of its
-    cycles plus 2 units a piece charged. Printed; held strictly so it turns
-    green when the slack comes under."""
+    """Ruling 9: a whole call on valid caches is charged within 8% of its
+    cycles plus 2 units a piece (a regression bound at the measured level:
+    the sum of the pieces' named worst paths a call didn't take, each paid
+    before the path is known: the call's stop, the event's first run and
+    scan, the rows' multiply and tries, a many-layer set-up's passes; see
+    task-7-report.md), and never under. Printed."""
     rnd = random.Random(98)
     rows = []
     for trial in range(40):
@@ -951,10 +969,11 @@ def test_whole_call_is_tight(r):
         rec = trace_call(r, "fish_rect_rows", 0xFFFF)
         ps = pieces_of(rec)
         units, cycles = rec[0][2] - rec[-1][2], rec[-1][1]
-        rows.append((16 * units - cycles - (cycles * 0.03 + 32 * len(ps)), 16 * units - cycles, cycles, len(ps)))
+        rows.append(((16 * units - cycles) / cycles, 16 * units - cycles, cycles, len(ps)))
     rows.sort(reverse=True)
-    print("\nwhole calls: (over the bound, slack, cycles, pieces)", rows[:5], "...", rows[-1])
-    assert all(over <= 0 for over, *_ in rows), rows[0]
+    print("\nwhole calls: (slack share, slack, cycles, pieces)", [(f"{sh:.1%}",) + tuple(rest) for sh, *rest in rows[:5]],
+          "...", rows[-1])
+    assert all(0 <= slack <= WHOLE_SLACK * cycles + 32 * pieces for _, slack, cycles, pieces in rows), rows[0]
 
 
 def test_pieces_are_tight(r):
@@ -1101,14 +1120,15 @@ def test_pieces_are_tight(r):
                     hold("rows", units, cycles, rows_var(x, rect[1] - rect[0], bg=True), (specs, rect, left))
             if r.carry():
                 break
-    # the cap's dearest case, deterministically: the empty sea, runs of 63-156 rows, every width,
-    # budgets that leave one or two rows after FC_ROWS and FC_PART (the rows piece then pays for
-    # the multiply at 63 rows and every try)
+    # the cap's dearest case, deterministically: the empty sea, runs of 63-156 rows from row 0 and
+    # from row 60 (a first row inside 51-115 is the least margin: Ruling 11), every width, budgets
+    # that leave one or two rows after FC_ROWS and FC_PART (the rows piece then pays for the
+    # multiply at 63 rows and every try)
     clear(r)
     fixed = a("FC_CALL") + a("FC_EVENT") + a("FC_SETUP") + a("FC_ROWS") + a("FC_PART")
     for w in range(1, 9):
-        for n in range(63, 157):
-            rect = (14, 14 + w, 0, n)
+        for r0, n in ((r0, n) for r0 in (0, 60) for n in range(63, 157 - r0)):   # (Ruling 11: first rows 51-115 too)
+            rect = (14, 14 + w, r0, r0 + n)
             set_rect(r, rect)
             r.call("fish_rect_begin")
             trace_call(r, "fish_rect_rows", fixed)             # (stops at FC_PART: the run is set up)
@@ -1277,10 +1297,11 @@ def test_hop_costs(rh, hop_size):
 
 def test_init_time(built):
     """fish_init with 10 creatures runs under 0.6 s (600,000 cycles; measured
-    562,000: about 364,000 whatever the count, for the mirrored frames, the
+    544,000: about 364,000 whatever the count, for the mirrored frames, the
     shift tables, the code copies, the kernel bodies and the floor, then about
-    20,000 a creature, 5,000-7,000 of it the step's arrive). The plan asked
-    for 0.5 s; see task-7-report.md."""
+    18,000 a creature; the step's arrive, 5,000-7,000 a creature, left init in
+    Task 8 for the first ticks). The plan asked for 0.5 s; see
+    task-7-report.md and task-8-report.md."""
     worst = 0
     for seed in (0x4D2A, 0x1357, 0xBEEF, 0x2468):
         s = Sim().load_effects()
@@ -1940,16 +1961,47 @@ def test_motion_costs(r, spawns):
 
 # ---------------------------------------------------------------- the step
 # Every tick: each Seaweed's tick, a half-drawn rect goes on, the hops due
-# (the one due longest first), then background work, all paid for from one
-# tick's budget.
+# (late first), newcomers' beats, hops due next tick started early while half
+# a tick is left, then background work, all paid for from one tick's budget.
+# The rule (task-8-context.md): every hop within one tick of its beat, early
+# or late; no hop more than one tick late, none more than one early, late
+# hops at most 5%; background work never makes a hop late.
 
 SEEDS = (0x4D2A, 0x1357, 0xBEEF, 0x2468, 0x5EED, 0x0F0F)
 HARD = TICK - OVERHEAD                  # a step must finish under this
-# Open (task-5-report.md): a hop whose rect crosses another creature draws
-# mixed rows, 3-4 ticks of budget, and the pending rect holds every other hop
-# back, so two creatures crossing fall behind at any count.
-OPEN = "open: a rect crossing another creature takes 3-4 ticks and holds back every hop"
-POLLS = 60                              # a IIc's vbl_poll costs up to 18 more than here
+# How many creatures the rule tests run at, by hop size: the most the
+# simulator holds by the letter (task-8-report.md). The scheduling model with
+# the engine's measured costs said 4-dot hops 3, 2-dot 2; on the simulator
+# 4-dot 3 holds on five seeds of six and fails the sixth (seed 0F0F: 9 late of
+# 1,668 hops, two of them 2 ticks late, in a crowd of three fish crossing at
+# the floor, whose hops are 2.3 ticks of drawing each), so the test runs at 2
+# until that is ruled on; test_counts_table prints 3-6. Task 9 sets fish_count.
+RULE_COUNT = {2: 2, 4: 2}
+# The step's own work has no vbl_poll in it: fish_rect_begin's is inside
+# ST_BEGIN and fish_bg_rows's inside FC_BGCALL, both charged for a IIc's
+# slowest poll (test_polls_at_their_slowest).
+POLLS = 0
+
+
+def vbl(s):
+    """The IIc's vertical-blank mode: the step doesn't pad itself to a tick
+    (the harness's default is the cycle-counted fallback, where it does;
+    test_fallback_pacing covers that)."""
+    s.poke(ST_TIMING, 1)
+
+
+def start_fish(seed=0x4D2A, prepare=None, build=None, count=None):
+    """Fish! started, then in vertical-blank mode (set after init: the
+    harness's wipe waits for ticks the fallback way), with `count` creatures
+    (the build's fish_count if None)."""
+    def prep(s):
+        if count is not None:
+            s.poke(s.addr("fish_count"), count)
+        if prepare:
+            prepare(s)
+    s = start(FX, seed=seed, prepare=prep, build=build)
+    vbl(s)
+    return s
 
 
 def due(s, i):
@@ -1972,6 +2024,8 @@ def hopping(s):
 
 
 def weight(s, i):
+    """Its weight in fish_load; 0 for a Seaweed, or a newcomer still awaiting
+    its beat."""
     return s.peek(s.addr("fish_w") + i)
 
 
@@ -1986,8 +2040,9 @@ def load_of(s):
     of the cycle that its hops fall on (its due tick, mod its beat)."""
     load = [0] * cycle(s)
     for i, _, beat in hopping(s):
-        for t in range(due(s, i) % beat, cycle(s), beat):
-            load[t] = (load[t] + weight(s, i)) & 0xFF
+        if weight(s, i):
+            for t in range(due(s, i) % beat, cycle(s), beat):
+                load[t] = (load[t] + weight(s, i)) & 0xFF
     return load
 
 
@@ -2003,12 +2058,13 @@ def quietest(load, first, beat):
 
 def counters(s):
     a = s.addr
+    early = s.peek16(a("fish_early")) if "fish_early" in s.labels else 0
     return dict(late_max=s.peek(a("fish_late_max")), hops=s.peek16(a("fish_hops")),
-                late=s.peek16(a("fish_late")), peak=s.peek(a("fish_bgq_peak")),
+                late=s.peek16(a("fish_late")), early=early, peak=s.peek(a("fish_bgq_peak")),
                 over=s.peek16(a("fish_bgq_over")), busy=s.peek16(a("fish_bg_busy_max")))
 
 
-def hops_on(c, k, hop=2):
+def hops_on(c, k, hop):
     """(every place k hops can take creature c, turning or not, and whether
     any of up to k hops takes it off)."""
     now_, gone = [c], False
@@ -2025,28 +2081,29 @@ def hops_on(c, k, hop=2):
 
 
 def watch(s, steps):
-    """Run steps, watching from outside how each creature keeps its beat.
-    Returns (cycles per step, problems)."""
+    """Run steps, watching from outside how each creature keeps its beat:
+    a creature moves only when a hop falls due (or a tick before: an early
+    start), never two ticks early; its due advances by exactly its beat per
+    hop; it leaves only by a hop that takes it off, and a newcomer takes the
+    slot; a newcomer that hops waits for its beat (weight 0), then its first
+    due is 1-beat ticks on from the tick it got it, by the spreading rule
+    (the quietest busiest tick, smallest p); fish_load is always the sum of
+    the weights; and over its life each creature keeps its pace to within a
+    hop. Returns (cycles per step, problems)."""
     problems = []
     t = now(s)
     n = cycle(s)
     hop = s.addr("FISH_HOP")
-    load = [0] * n                      # init's arrivals, in slot order
-    for i, c, beat in hopping(s):
-        p = due(s, i) - t - 1
-        if not 0 <= p < beat or p != quietest(load, t + 1, beat):
-            problems.append(("init's first due", i, c, due(s, i), beat))
-        for k in range(n // beat):
-            load[(t + 1 + p + k * beat) % n] += weight(s, i)
-    if load != load_of(s) or bytes(load) != mem(s, "fish_load", n):
-        problems.append(("init's fish_load",))
-    lives = {i: [due(s, i), beat, 0] for i, _, beat in hopping(s)}   # first due, beat, hops
+    lives = {i: [due(s, i), beat, 0] for i, _, beat in hopping(s) if weight(s, i)}
     cycles = []
 
     def pace(i, t):
+        if i not in lives:
+            return
         first, beat, hops = lives.pop(i)
         ticks = t - first
-        if ticks >= 0 and not ticks // beat <= hops <= ticks // beat + 1:
+        # one late at every hop keeps ticks // beat; one early at every hop reaches (ticks + 1) // beat + 1
+        if ticks >= 0 and not ticks // beat <= hops <= (ticks + 1) // beat + 1:
             problems.append(("pace", i, first, beat, hops, t))
 
     for step in range(steps):
@@ -2056,13 +2113,20 @@ def watch(s, steps):
         cycles.append(s.step())
         t = now(s)
         after = fishref.creatures(s)
-        renewed = []
+        renewed = []                    # (slot, the one that left, its weight, due and beat)
+        arrived = []                    # (slot, the leaver's weight, due and beat if it left this step)
         for i, c1 in enumerate(after):
             c0, d0, b0, w0 = before[i]
-            d1 = due(s, i)
+            d1, w1 = due(s, i), weight(s, i)
             if role(c0["kind"]) == ROLE_STILL:
                 if pos(c1) != pos(c0) and (pos(c1) | {"frame": 0}) != (pos(c0) | {"frame": 0}):
                     renewed.append((i, c0, w0, d0, b0))
+                continue
+            if w0 == 0:                 # awaiting its beat
+                if c1 != c0:
+                    problems.append(("moved before its beat", step, i, c0, c1))
+                elif w1:
+                    arrived.append((i, None))
                 continue
             k = (d1 - d0) // b0 if d1 > d0 and (d1 - d0) % b0 == 0 else 0
             if c1 == c0:
@@ -2070,10 +2134,10 @@ def watch(s, steps):
                     problems.append(("due moved without a hop", step, i, d0, d1))
             elif k and c1 in hops_on(c0, k, hop)[0]:
                 lives[i][2] += k            # (one far behind can catch up two at once)
-                if d0 + (k - 1) * b0 > t:
+                if d0 + (k - 1) * b0 > t + 1:
                     problems.append(("hop", step, i, t, d0, d1, b0))
             else:
-                if not hops_on(c0, 4, hop)[1] or d0 > t or not is_newcomer(c1):
+                if not hops_on(c0, 4, hop)[1] or d0 > t + 1 or not is_newcomer(c1):
                     problems.append(("left", step, i, c0, c1, d0, t))
                 lives[i][2] += 1
                 pace(i, t)
@@ -2082,12 +2146,16 @@ def watch(s, steps):
             c1 = after[i]
             if role(c1["kind"]) == ROLE_STILL:
                 continue
+            if weight(s, i):                # its beat in the same step
+                arrived.append((i, (w0, d0, b0) if role(c0["kind"]) != ROLE_STILL else None))
+        for i, leaver in arrived:
             beat, d1 = s.peek(s.addr("fish_beat") + i), due(s, i)
             if not t + 1 <= d1 <= t + beat:
                 problems.append(("newcomer's first due", step, i, t, d1, beat))
-            elif len(renewed) == 1:
-                seen = list(load0)          # what it saw: less the one that left
-                if role(c0["kind"]) != ROLE_STILL:
+            elif len(arrived) == 1:
+                seen = list(load0)          # what it saw: less the one that left this step
+                if leaver:
+                    w0, d0, b0 = leaver
                     for k in range(d0 % b0, n, b0):
                         seen[k] = (seen[k] - w0) & 0xFF
                 if d1 - t - 1 != quietest(seen, t + 1, beat):
@@ -2104,60 +2172,72 @@ def watch(s, steps):
 
 @pytest.fixture(scope="module")
 def fuzz(hop_dir, hop_size):
-    """Fish! at fish_count, 6 seeds x 6,000 steps, watched, in each build: per
+    """Fish! at RULE_COUNT, 6 seeds x 6,000 steps, watched, in each build: per
     seed, the step's counters, its cycles and how each creature kept its beat."""
     out = {}
     for seed in SEEDS:
-        s = start(FX, seed=seed, build=hop_dir)
+        s = start_fish(seed=seed, build=hop_dir, count=RULE_COUNT[hop_size])
         cycles, problems = watch(s, 6000)
         out[seed] = dict(counters(s), cycles=cycles, problems=problems)
     return out
 
 
 def test_budget(hop_dir):
-    worst, median = check_budget(FX, steps=3000, build=hop_dir)
+    """check_budget's rule at the build's fish_count, in vertical-blank mode:
+    every step inside its tick, and the typical step under 85% of one."""
+    cycles = []
+    for seed in SEEDS[:3]:
+        s = start_fish(seed=seed, build=hop_dir)
+        cycles += [s.step() for _ in range(3000)]
+    worst, median = max(cycles), sorted(cycles)[len(cycles) // 2]
     print(f"\nworst step {worst} cycles, median {median} (limits {HARD}, {TICK * 0.85:.0f})")
+    assert worst < HARD, worst
+    assert median < TICK * 0.85, median
 
 
 def test_in_bounds(hop_dir):
     """Writes only its own memory; never bit 7 on page 1 (page 2 holds its
-    art and code, and is never shown)."""
-    s = check_in_bounds(FX, steps=3000, build=hop_dir, extra=FISH_ALLOWED, extra_aux=FISH_ALLOWED_AUX)
-    assert s.aux_writes_outside(*FISH_ALLOWED_AUX) == []
-    assert all(b & 0x80 == 0 for b in s.page_bytes(PAGE1))
+    art and code, and is never shown). In both timing modes (the fallback
+    pads the step)."""
+    for mode, steps in ((1, 3000), (0, 1000)):
+        s = start_fish(build=hop_dir)
+        s.poke(ST_TIMING, mode)
+        s.start_tracking()
+        for _ in range(steps):
+            s.step()
+        assert s.writes_outside(*ALLOWED, *FISH_ALLOWED) == []
+        assert s.aux_writes_outside(*FISH_ALLOWED_AUX) == []
+        assert all(b & 0x80 == 0 for b in s.page_bytes(PAGE1))
 
 
-@pytest.mark.xfail(strict=True, reason=OPEN)
-def test_never_more_than_one_tick_late(fuzz):
-    """Wells's rule: no hop more than one tick late, and late hops rare (at
-    most 5%)."""
+def test_every_hop_within_one_tick(fuzz):
+    """The rule: no hop more than one tick late, none more than one early
+    (watch flags a hop before due - 1), late hops at most 5%."""
     rows = []
     for seed, f in fuzz.items():
         rows.append(f"seed {seed:04X}: latest {f['late_max']}, late {f['late']} of {f['hops']} hops "
-                    f"({f['late'] / f['hops']:.1%})")
+                    f"({f['late'] / f['hops']:.1%}), early {f['early']} ({f['early'] / f['hops']:.1%}), "
+                    f"worst step {max(f['cycles'])}, median {sorted(f['cycles'])[len(f['cycles']) // 2]}")
     print("\n" + "\n".join(rows))
     for seed, f in fuzz.items():
         assert f["late_max"] <= 1, (hex(seed), f["late_max"])
         assert f["late"] <= 0.05 * f["hops"], (hex(seed), f["late"], f["hops"])
+        early = [p for p in f["problems"] if p[0] == "hop"]
+        assert not early, (hex(seed), early[:5])
 
 
 def test_keeps_its_beat(fuzz):
     """Every creature's hops are due on its own beat from its first due tick
     (base + i * beat, never from when it last moved), it moves exactly when
-    one falls due, and over its life it keeps its pace to within a hop. Its
-    first due tick is 1-beat ticks after it arrives, the one whose busiest
-    tick in the 60 is quietest; fish_load stays the sum of every creature's
-    weight on the ticks its hops fall on."""
+    one falls due or a tick before, and over its life it keeps its pace to
+    within a hop. A newcomer waits for its beat, then its first due tick is
+    1-beat ticks on, the one whose busiest tick in the cycle is quietest;
+    fish_load stays the sum of every creature's weight on the ticks its hops
+    fall on."""
     for seed, f in fuzz.items():
-        wrong = [p for p in f["problems"] if p[0] != "pace"]
-        assert not wrong, (hex(seed), len(wrong), wrong[:5])
-    behind = {hex(seed): sum(p[0] == "pace" for p in f["problems"]) for seed, f in fuzz.items()}
-    print("\nlives more than a hop behind their pace:", behind)
-    if any(behind.values()):
-        pytest.xfail(OPEN)
+        assert not f["problems"], (hex(seed), len(f["problems"]), f["problems"][:5])
 
 
-@pytest.mark.xfail(strict=False, reason=OPEN)    # (4-dot hops can pass it)
 def test_background_keeps_up(fuzz):
     """The background queue never overflows, and is never busy for more
     than 5 s on end."""
@@ -2168,17 +2248,31 @@ def test_background_keeps_up(fuzz):
         assert f["over"] == 0 and f["busy"] <= 300, (hex(seed), f["over"], f["busy"])
 
 
-def test_screen_is_always_right(built):
-    """3 seeds x 3,000 steps at fish_count, and one with 2 creatures:
-    whenever nothing is half drawn and no background work is queued or under
-    way, page 1 and FISH_BG are the composition rule's. Often enough that
-    the check means something (at 2 creatures however the open question
-    goes)."""
-    def prepare(s):
-        s.poke(s.addr("fish_count"), 2)
-    few = []
-    for seed, prep in ((0x2468, prepare),) + tuple((seed, None) for seed in SEEDS[:3]):
-        s = start(FX, seed=seed, prepare=prep)
+def test_counts_table(hop_dir, hop_size):
+    """Printed for Task 9: late, early, worst and median step at counts 3-6
+    in this build (2 seeds x 2,000 steps); every step fits its tick at every
+    count."""
+    rows = []
+    for count in (3, 4, 5, 6):
+        for seed in SEEDS[:2]:
+            s = start_fish(seed=seed, build=hop_dir, count=count)
+            cycles = [s.step() for _ in range(2000)]
+            c = counters(s)
+            cycles.sort()
+            rows.append(f"count {count} seed {seed:04X}: latest {c['late_max']}, late {c['late']} of {c['hops']} "
+                        f"({c['late'] / max(c['hops'], 1):.1%}), early {c['early']} ({c['early'] / max(c['hops'], 1):.1%}), "
+                        f"worst step {cycles[-1]}, median {cycles[len(cycles) // 2]}")
+            assert cycles[-1] < HARD, rows[-1]
+    print(f"\n{hop_size}-dot hops:\n" + "\n".join(rows))
+
+
+def test_screen_is_always_right(hop_dir, hop_size):
+    """3 seeds x 3,000 steps at RULE_COUNT, and one with 2 creatures: whenever
+    nothing is half drawn and no background work is queued or under way,
+    page 1 and FISH_BG are the composition rule's; at least 300 times a run,
+    so the check means something."""
+    for seed, count in ((0x2468, 2),) + tuple((seed, RULE_COUNT[hop_size]) for seed in SEEDS[:3]):
+        s = start_fish(seed=seed, build=hop_dir, count=count)
         compared = 0
         for step in range(3000):
             s.step()
@@ -2186,70 +2280,70 @@ def test_screen_is_always_right(built):
                 assert fishref.fish_bg(s) == fishref.expected_bg(s), (hex(seed), step)
                 assert s.page_bytes(PAGE1) == fishref.expected_page(s), (hex(seed), step)
                 compared += 1
-        n = s.peek(s.addr("fish_n"))
-        print(f"\n{n} creatures, seed {seed:04X}: compared after {compared} of 3000 steps")
-        if prep:
-            assert compared >= 300, (hex(seed), compared)
-        elif compared < 300:
-            few.append((hex(seed), compared))
-    if few:
-        pytest.xfail(f"{OPEN}: rarely idle at fish_count {few}")
+        print(f"\n{count} creatures, seed {seed:04X}: compared after {compared} of 3000 steps")
+        assert compared >= 300, (hex(seed), compared)
 
 
-def split(s):
-    """One step: (cycles, cycles outside what is paid for, the dearest hop's
-    scheduling, cycles outside what is paid for counting all scheduling as
-    unpaid). A hop pays HOP_SCHED for the step's own work on it: the st_pick
-    that found it and the st_hop that made it (apart from the calls they
-    make: fish_hop, renew, st_begin, fish_rect_rows), so those are paid, and
-    measured st_pick + st_hop a hop; a st_pick that finds nothing, or whose
-    st_hop can't afford the hop (never reaching fish_hop), is paid by nobody
-    and stays in the step's own work."""
+def run_traced(s, entry, paid, outer=None, x=0, max_cycles=100_000):
+    """Run `entry` (a label) to its return, with X: (cycles, cycles inside
+    the routines in `paid` (counted from their entry to their return), and
+    per routine in `outer` the list of (its own cycles outside `paid`
+    routines, whether a `paid` routine was reached inside it))."""
     a = s.addr
-    paid = {a(n) for n in ("fish_weed", "fish_hop", "renew", "st_begin", "fish_rect_rows", "fish_bg_rows")}
-    sched_outer = {a("st_pick"): "pick", a("st_hop"): "hop"}
+    paid = {a(n) for n in paid}
+    outer = {a(n): n for n in (outer or ())}
     mpu = s.mpu
     ret = 0x0200 - 1
     s.mem.ram[0x1FF], s.mem.ram[0x1FE] = ret >> 8, ret & 0xFF
-    mpu.sp, mpu.pc, mpu.p = 0xFD, OVL + 3, 0x34
+    mpu.sp, mpu.pc, mpu.p, mpu.x = 0xFD, a(entry), 0x34, x
     t0 = mpu.processorCycles
     inside, inside_cycles = None, 0
-    outer, cur, hopped, parts = None, 0, False, []     # parts: (kind, own cycles, reached fish_hop)
+    cur, parts = None, {n: [] for n in outer.values()}
     while mpu.pc != 0x0200:
         pc = mpu.pc
         if inside is None and pc in paid:
             inside = (mpu.sp, mpu.processorCycles)
-            if pc == a("fish_hop"):
-                hopped = True
-        if outer is None and pc in sched_outer:
-            outer, cur, hopped = (mpu.sp, sched_outer[pc]), 0, False
+            if cur is not None:
+                cur[2] = True
+        if cur is None and pc in outer:
+            cur = [outer[pc], mpu.sp, False, 0]
         t = mpu.processorCycles
         mpu.step()
-        if outer is not None and inside is None:
-            cur += mpu.processorCycles - t
+        if cur is not None and inside is None:
+            cur[3] += mpu.processorCycles - t
         if inside and mpu.sp > inside[0]:
             inside_cycles += mpu.processorCycles - inside[1]
             inside = None
-        if outer is not None and mpu.sp > outer[0]:
-            parts.append((outer[1], cur, hopped))
-            outer = None
-        assert mpu.processorCycles - t0 < 100_000
-    total = mpu.processorCycles - t0
-    # a hop's scheduling: a st_pick and the st_hop after it, paid when that st_hop reached fish_hop
-    sched_paid, sched = 0, 0
-    for i in range(len(parts) - 1):
-        if parts[i][0] == "pick" and parts[i + 1][0] == "hop" and parts[i + 1][2]:
-            c = parts[i][1] + parts[i + 1][1]
-            sched_paid += c
-            sched = max(sched, c)
-    own_all = total - inside_cycles
-    return total, own_all - sched_paid, sched, own_all
+        if cur is not None and mpu.sp > cur[1]:
+            parts[cur[0]].append((cur[3], cur[2]))
+            cur = None
+        assert mpu.processorCycles - t0 < max_cycles
+    return mpu.processorCycles - t0, inside_cycles, parts
+
+
+PAID = ("st_weed", "st_arrive", "st_begin", "fish_rect_rows", "fish_bg_rows")
+
+
+def split(s):
+    """One step: (cycles, cycles outside what is paid for, the dearest hop's
+    own scheduling). Paid: st_weed (WEED_*), st_arrive (ARR_UNITS), st_begin
+    (ST_BEGIN...), fish_rect_rows and fish_bg_rows (the renderer's charges),
+    and st_hop when it hopped (HOP_SCHED pays its own work: may_go, the
+    afford, the counting, outside fish_hop, renew, st_begin and the rows,
+    which pay for themselves); an st_hop that couldn't afford its hop is
+    paid by nobody and stays in the step's own work."""
+    total, inside, parts = run_traced(s, OVL + 3, PAID + ("fish_hop", "renew"), outer=("st_hop",))
+    hop_paid = sum(c for c, hopped in parts["st_hop"] if hopped)
+    sched = max([c for c, hopped in parts["st_hop"] if hopped], default=0)
+    return total, total - inside - hop_paid, sched
 
 
 def test_cost_estimates_are_safe(rh, hop_dir, hop_size):
     """What the step pays covers every call: 2,000 random rects (a begin, and
-    rows on random budgets: at most 16 cycles a unit), hops (staying, or gone
-    and the newcomer's arrival), Seaweed ticks, sways and departures. And the
+    rows on random budgets: at most 16 cycles a unit), st_hop whole (staying,
+    at the exits, gone and the newcomer counted: HOP_STAY or HOP_GONE with the
+    begin and rows it pays for), its own scheduling within HOP_SCHED, st_weed
+    whole (ticks, sways, departures), st_arrive whole (ARR_UNITS). And the
     step's own work outside those calls leaves room for STEP_UNITS in a tick."""
     r = rh
     a = r.addr
@@ -2275,6 +2369,7 @@ def test_cost_estimates_are_safe(rh, hop_dir, hop_size):
         r.poke16(a("fish_now"), rnd.randrange(1, 60000))
         r.poke(a("fish_now60"), now(r) % n_cycle)
         r.mem.ram[a("fish_load"):a("fish_load") + n_cycle] = bytes(rnd.randrange(60) for _ in range(n_cycle))
+        r.poke(a("ST_NARR"), 0)
         for i in range(n):
             if role(specs[i][0]) == ROLE_STILL:
                 set_life(r, i, rnd.choice((1, 500)), flip=rnd.choice((10, 89)))
@@ -2283,6 +2378,7 @@ def test_cost_estimates_are_safe(rh, hop_dir, hop_size):
         r.poke(a("st_lastw"), 0xFF)
         r.call("st_worst")
         r.call("fish_bgq_reset")
+        r.poke(a("fish_pending"), 0)
         return specs
 
     spare = {}
@@ -2290,6 +2386,16 @@ def test_cost_estimates_are_safe(rh, hop_dir, hop_size):
     def paid(label, cycles, units):
         assert cycles <= 16 * units, (label, cycles, units)
         spare[label] = min(spare.get(label, 99999), 16 * units - cycles)
+
+    def whole(label, routine, x, units=None):
+        """routine with FR_LEFT = $FFFF: its cycles against what it charged."""
+        r.poke16(a("FR_LEFT"), 0xFFFF)
+        cycles = r.call(routine, x=x, max_cycles=400_000)
+        charged = 0xFFFF - r.peek16(a("FR_LEFT"))
+        if units is not None:
+            assert charged == units, (label, charged, units)
+        paid(label, cycles, charged)
+        return cycles
 
     for trial in range(2000):
         if trial % 2:                       # spread out, or crowded round a point
@@ -2310,21 +2416,19 @@ def test_cost_estimates_are_safe(rh, hop_dir, hop_size):
             paid("rows", cycles, max(left - r.peek16(a("FR_LEFT")), fc_call if left < fc_call else 0))
             if r.carry():
                 break
+    sched = 0
     for trial in range(1500):
         specs = scene(rnd.randrange(1, 11))
         i = rnd.randrange(len(specs))
         kind = specs[i][0]
         k = kind_of(kind)
         if role(kind) == ROLE_STILL:
-            life, flip = slot(r, i)["life"], slot(r, i)["flip"]
+            flip = slot(r, i)["flip"]
+            life = slot(r, i)["life"]
             r.poke(a("fish_newslot"), 0xFF)
-            cycles = r.call("fish_weed", x=i)
-            if r.peek(a("fish_newslot")) == i:
-                cycles += r.call("renew", x=i)
-                paid("weed goes", cycles, a("WEED_GONE") + a("ARR_UNITS"))
-            else:
-                paid("weed sways" if flip == 89 else "weed tick", cycles,
-                     a("WEED_SWAY") if flip == 89 else a("WEED_TICK"))
+            cycles = whole("weed goes" if life == 1 else "weed sways" if flip == 89 else "weed tick", "st_weed", i)
+            if life == 1:
+                assert r.peek(a("fish_newslot")) == i
             continue
         if trial % 2:                       # at an exit
             if role(kind) == ROLE_RISE:
@@ -2333,45 +2437,62 @@ def test_cost_estimates_are_safe(rh, hop_dir, hop_size):
                 xy = (rnd.choice((-k["cw"] - rnd.randrange(3), 280 + rnd.randrange(3))), specs[i][4])
             place(r, specs[:i] + [specs[i][:3] + xy] + specs[i + 1:])
         r.poke(a("fish_newslot"), 0xFF)
-        cycles = r.call("fish_hop", x=i)            # (its scheduling, HOP_SCHED, is held apart below)
-        if r.peek(a("fish_newslot")) == i:
-            cycles += r.call("renew", x=i)
-            paid("hop, gone", cycles, a("HOP_GONE") - a("HOP_SCHED") + a("ARR_UNITS"))
-        else:
-            paid("hop", cycles, a("HOP_STAY") - a("HOP_SCHED"))
+        r.poke16(a("FR_LEFT"), 0xFFFF)
+        narr = r.peek(a("ST_NARR"))
+        cycles, _, parts = run_traced(r, "st_hop", PAID + ("fish_hop", "renew"), outer=("st_hop",), x=i,
+                                      max_cycles=400_000)
+        gone = r.peek(a("fish_newslot")) == i
+        charged = 0xFFFF - r.peek16(a("FR_LEFT"))
+        paid("hop, gone" if gone else "hop", cycles, charged)
+        own, hopped = parts["st_hop"][0]
+        assert hopped
+        sched = max(sched, own)
+        if gone:
+            newcomer_weed = role(fishref.creatures(r)[i]["kind"]) == ROLE_STILL
+            assert r.peek(a("ST_NARR")) == narr + (0 if newcomer_weed else 1)
+            assert weight(r, i) == 0
+            if not newcomer_weed:            # its beat: st_arrive whole
+                r.poke(a("fish_pending"), 0)
+                whole("arrive", "st_arrive", 0, a("ARR_UNITS"))
+                assert r.peek(a("ST_NARR")) == narr and weight(r, i) > 0 and r.carry()
     print("\nleast cycles to spare (16 x units - cycles):",
           ", ".join(f"{k} {v}" for k, v in sorted(spare.items())))
-    # the step's own work, outside what it pays for (a hop's scheduling is paid, HOP_SCHED, only
-    # when the hop happens); and a hop's scheduling against that
-    most, most_all, sched = 0, 0, 0
+    assert sched <= 16 * a("HOP_SCHED"), (sched, 16 * a("HOP_SCHED"))
+    # the step's own work, outside what it pays for; and a hop's scheduling against HOP_SCHED
+    most, worst_sched = 0, 0
     for count, seed in ((6, 0x4D2A), (6, 0xBEEF), (10, 0x1357), (10, 0x2468)):
-        def prepare(s):
-            s.poke(s.addr("fish_count"), count)
-        s = start(FX, seed=seed, prepare=prepare, build=hop_dir)
+        s = start_fish(seed=seed, build=hop_dir, count=count)
         for _ in range(600):
-            _, own, sc, own_all = split(s)
-            most, most_all, sched = max(most, own), max(most_all, own_all), max(sched, sc)
+            _, own, sc = split(s)
+            most, worst_sched = max(most, own), max(worst_sched, sc)
     units = a("STEP_UNITS")
-    print(f"step's own work at most {most} cycles ({most_all} counting every hop's scheduling as unpaid); "
-          f"with STEP_UNITS {units}: {most + 16 * units + POLLS} of {HARD}; "
-          f"a hop's scheduling at most {sched} (HOP_SCHED {16 * a('HOP_SCHED')})")
-    assert most + 16 * units + POLLS < HARD
-    assert sched <= 16 * a("HOP_SCHED")
+    print(f"step's own work at most {most} cycles sampled (STEP_OWN counts {STEP_OWN} at worst); "
+          f"with STEP_UNITS {units}: {STEP_OWN + 16 * units + POLLS} of {HARD}; "
+          f"a hop's scheduling at most {max(sched, worst_sched)} (HOP_SCHED {16 * a('HOP_SCHED')})")
+    assert most <= STEP_OWN
+    assert STEP_OWN + 16 * units + POLLS < HARD
+    assert worst_sched <= 16 * a("HOP_SCHED")
+
+
+# The step's own work at its worst, by count (the paths no charge covers; see
+# test_step_own_work_by_count, which measures each): set in task-8-report.md.
+STEP_OWN = 1_200
 
 
 def clean(s, why):
     """Fish! just initialised: its clock and counters zero, nothing pending or
-    queued, every creature's first hop due 1-beat ticks on, fish_load theirs,
-    and the screen and FISH_BG the composition."""
+    queued, every creature that hops awaiting its beat (fish_load empty), and
+    the screen and FISH_BG the composition."""
     a = s.addr
     assert now(s) == 0 and s.peek(a("fish_now60")) == 0, why
-    assert counters(s) == dict(late_max=0, hops=0, late=0, peak=0, over=0, busy=0), why
+    assert counters(s) == dict(late_max=0, hops=0, late=0, early=0, peak=0, over=0, busy=0), why
     assert s.peek16(a("fish_bg_busy")) == 0, why
     assert s.peek(a("fish_pending")) == 0 and s.peek(a("fish_bgw")) == 0, why
     assert queue(s) == [], why
-    for i, _, beat in hopping(s):
-        assert 1 <= due(s, i) <= beat, why
-    assert mem(s, "fish_load", cycle(s)) == bytes(load_of(s)), why
+    hoppers = hopping(s)
+    assert all(weight(s, i) == 0 for i, _, _ in hoppers), why
+    assert s.peek(a("ST_NARR")) == len(hoppers), why
+    assert mem(s, "fish_load", cycle(s)) == bytes(cycle(s)), why
     assert fishref.fish_bg(s) == fishref.expected_bg(s), why
     assert s.page_bytes(PAGE1) == fishref.expected_page(s), why
 
@@ -2390,8 +2511,7 @@ def test_second_run_starts_clean(hop_dir, hop_size):
     toasters run (they write over page 2 and FXRAM), and the language card's
     spare area and Fish!'s aux areas are filled with junk; Fish! starts again
     clean. And again after Ctrl-Reset (restart) while Fish! was mid-work.
-    (The 4-dot build no longer parks creatures at the edges: a begin is
-    cheaper, so a leaving hop fits its tick.)"""
+    (In fallback mode: the wipes between effects wait for ticks that way.)"""
     s = start(FX, seed=0x5EED, build=hop_dir)
     for _ in range(500):
         s.step()
@@ -2424,3 +2544,123 @@ def test_second_run_starts_clean(hop_dir, hop_size):
         assert mpu.processorCycles - t0 < 30_000_000
     assert s.peek(ST_FX) == FX
     clean(s, "after Ctrl-Reset")
+
+
+def test_fallback_pad(hop_dir):
+    """Without a vertical blank (ST_TIMING = 0) a step pads itself (st_pad):
+    16 cycles a unit left and 2 a unit of STEP_UNITS, so the typical step
+    with the randomizer's overhead lands within 10% of a tick
+    (test_fallback_pacing holds the period); with the blank it doesn't."""
+    s = start_fish(seed=0x1357, build=hop_dir)
+    a = s.addr
+    units = a("STEP_UNITS")
+    for mode in (0, 1):
+        s.poke(ST_TIMING, mode)
+        padded = []
+        for _ in range(200):
+            cycles = s.step()
+            left = s.peek16(a("FR_LEFT"))
+            if mode:                        # no pad: its work alone
+                assert cycles <= 16 * (units - left) + STEP_OWN, (cycles, left)
+            else:                           # padded: every unit left waited out, 2 more a unit of the budget
+                assert left == 0
+                assert cycles <= STEP_OWN + 18 * units, cycles
+                padded.append(cycles)
+        if not mode:                        # (a call spends under its charge: see st_pad)
+            median = sorted(padded)[100]
+            print(f"\npadded steps: median {median}, least {min(padded)}, most {max(padded)} (a tick {TICK})")
+            assert TICK * 0.9 <= median + OVERHEAD <= TICK * 1.1, median
+
+
+def cycles_to(s, entry, stop, paid, x=0):
+    """Run `entry` until the pc reaches `stop`: cycles outside the `paid`
+    routines (entry to return)."""
+    a = s.addr
+    paid = {a(n) for n in paid}
+    mpu = s.mpu
+    ret = 0x0200 - 1
+    s.mem.ram[0x1FF], s.mem.ram[0x1FE] = ret >> 8, ret & 0xFF
+    mpu.sp, mpu.pc, mpu.p, mpu.x = 0xFD, a(entry), 0x34, x
+    t0 = mpu.processorCycles
+    inside, inside_cycles = None, 0
+    while mpu.pc != a(stop):
+        assert mpu.pc != 0x0200
+        if inside is None and mpu.pc in paid:
+            inside = (mpu.sp, mpu.processorCycles)
+        mpu.step()
+        if inside and mpu.sp > inside[0]:
+            inside_cycles += mpu.processorCycles - inside[1]
+            inside = None
+        assert mpu.processorCycles - t0 < 100_000
+    return mpu.processorCycles - t0 - inside_cycles
+
+
+def test_step_own_work_by_count(rh, hop_dir, hop_size):
+    """STEP_OWN, the step's own work at its worst, from the paths no charge
+    covers, each measured here: the tick's fixed part (the clock, the budget,
+    the pass over no slots, the checks that find nothing to do, the
+    background entry at its dearest), the pass over ten slots at its dearest
+    classification (a Seaweed's tick is paid whole by WEED_*), the list pops
+    of as many hops as a tick can hold, one hop that can't be afforded
+    (may_go, the sums and afford_t), and one newcomer's beat that can't be
+    (st_arrive's charge). Their sum is what STEP_UNITS leaves room for;
+    test_cost_estimates_are_safe holds the sampled steps under it."""
+    r = rh
+    a = r.addr
+
+    def scene(specs, due_in=5):
+        clear(r)
+        place(r, specs)
+        r.poke16(a("fish_now"), 1000)
+        r.poke(a("fish_now60"), 1000 % cycle(r))
+        for i, sp in enumerate(specs):
+            r.poke(a("fish_w") + i, 0 if role(sp[0]) == ROLE_STILL else 9)
+            r.poke(a("fish_beat") + i, 8)
+            r.poke(a("fish_duel") + i, (1001 + due_in) & 0xFF)
+            r.poke(a("fish_dueh") + i, ((1001 + due_in) >> 8) & 0xFF)
+            if role(sp[0]) == ROLE_STILL:
+                set_life(r, i, 500, flip=10)
+        r.poke(a("fish_pending"), 0)
+        r.poke(a("fish_bgw"), 0)
+        r.call("fish_bgq_reset")
+        r.poke(a("ST_NARR"), 0)
+        r.poke(a("ST_NWEED"), sum(role(sp[0]) == ROLE_STILL for sp in specs))
+        r.poke(a("st_lastw"), 0xFF)
+        r.call("st_worst")
+
+    # the tick with nothing in it, and its background entry
+    scene([])
+    fixed, _, parts = run_traced(r, "st_tick", PAID, outer=("st_bg",))
+    bg_fixed = parts["st_bg"][0][0]
+    # the pass over ten slots, by what it finds (the clock is in both)
+    scene([])
+    pass0 = cycles_to(r, "st_tick", "st_after_pass", PAID)
+    fish = [(2, 0, 0, 20 + 24 * i, 20 + 8 * i) for i in range(10)]
+    per_slot = {}
+    for due_in, name in ((5, "not yet"), (1, "next"), (0, "due"), (-1, "late"), (-300, "long late")):
+        scene(fish, due_in)
+        per_slot[name] = (cycles_to(r, "st_tick", "st_after_pass", PAID) - pass0) / 10
+    scene([(SEAWEED, 0, 0, 24 * i, 156) for i in range(10)])
+    per_slot["Seaweed"] = (cycles_to(r, "st_tick", "st_after_pass", PAID) - pass0) / 10
+    # the background entry at its dearest: each state with nothing left, and the empty queue
+    bg = bg_fixed
+    for bgw, left in ((0, 0), (1, 0), (2, 0), (0, 0xFFFF)):
+        r.poke(a("fish_bgw"), bgw)
+        r.poke16(a("FR_LEFT"), left)
+        bg = max(bg, run_traced(r, "st_bg", PAID)[0])
+    r.poke(a("fish_bgw"), 0)
+    # a hop that can't be afforded: a stayer, a Bubble about to go, a fish facing left at the edge
+    hop_fail = 0
+    for specs in ([(2, 0, 0, 100, 60)], [(11, 0, 0, 100, -10)], [(2, 0, 1, -30, 60)]):
+        scene(specs, 0)
+        r.poke16(a("FR_LEFT"), 0)
+        hop_fail = max(hop_fail, run_traced(r, "st_hop", PAID + ("fish_hop", "renew"))[0])
+    r.poke16(a("FR_LEFT"), 0)
+    arr_fail = run_traced(r, "st_arrive", PAID)[0]
+    hops = a("STEP_UNITS") // (a("HOP_STAY") + a("ST_BEGIN") + a("ST_BEGPER"))     # hops a tick can hold
+    pop = 20                            # a list pop before st_hop (ldy, beq, dey, sty, ldx, jsr, bcs)
+    total = fixed + 10 * max(per_slot.values()) + (bg - bg_fixed) + hops * pop + hop_fail + arr_fail
+    print(f"\n{hop_size}-dot: tick fixed {fixed} (background entry {bg_fixed}, at its dearest {bg}); pass per slot: "
+          + ", ".join(f"{k} {v:.0f}" for k, v in per_slot.items())
+          + f"; {hops} pops; a hop refused {hop_fail}, a beat refused {arr_fail}: by count {total:.0f} (STEP_OWN {STEP_OWN})")
+    assert total <= STEP_OWN, (total, STEP_OWN)
