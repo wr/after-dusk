@@ -1,4 +1,4 @@
-"""Fish!'s art: the generator's output is exactly what Wells approved."""
+"""Fish!'s art: the generator's output is exactly the approved drawings."""
 import hashlib
 import json
 import subprocess
@@ -53,7 +53,7 @@ def unpack(rows, x0, y0, w, h):
     return dots
 
 
-def test_art_is_what_wells_approved():
+def test_art_is_the_approved_drawings():
     assert hashlib.sha256(sample_blob().encode()).hexdigest() == APPROVED
 
 

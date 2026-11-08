@@ -642,9 +642,8 @@ fish_place:
         bra @draw
 @done:  rts
 
-; How many creatures fish_init places (tests poke it). Ruling 13 (Task 9):
-; 3 for either hop size, each with a named compromise the trial disks show
-; Wells. 2-dot: a crossing pair falls behind together while it overlaps and
+; How many creatures fish_init places (tests poke it). 3 for either hop size,
+; each with a known compromise. 2-dot: a crossing pair falls behind together while it overlaps and
 ; catches up after. 4-dot: a crowd of three crossing at the floor can make a
 ; hop two ticks late (2 of 1,668 in 600 s on one seed of six). The strict
 ; rule (none more than a tick late) holds 2 in both (tests/test_fx_fish.py:
