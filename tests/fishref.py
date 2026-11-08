@@ -131,7 +131,7 @@ def fish_bg(s):
 # How each creature moves, by the Global Constraints (the approved sample).
 
 ROLE_SWIM, ROLE_TOP, ROLE_FLOOR, ROLE_LOW, ROLE_RISE = 0, 1, 2, 3, 5
-HOP = 2                         # dots a swimmer moves, rows a Bubble rises
+HOP = 2                         # dots a swimmer moves, rows a Bubble rises (FISH_HOP: 2 or 4)
 
 
 class Rng:
@@ -181,17 +181,24 @@ def band(kind, anywhere):
     return ys, xs
 
 
-def hop(c, turn):
-    """(new, gone): creature c (not Seaweed) after one hop, and whether that
-    takes it off for good (it is then replaced by a newcomer). A Bubble rises
-    HOP rows; the rest turn round if `turn`, then move HOP dots the way they
-    face. Frames swap every hop."""
+def beats(hop=HOP):
+    """The swimmers' beats in ticks (Seaweed has none) and Bubbles': they
+    scale with the hop, so the speed stays 30 dots a second."""
+    return (4 * hop // 2, 5 * hop // 2, 6 * hop // 2), 3 * hop // 2
+
+
+def hop(c, turn, dots=HOP):
+    """(new, gone): creature c (not Seaweed) after one hop of `dots`, and
+    whether that takes it off for good (it is then replaced by a newcomer). A
+    Bubble rises `dots` rows; the rest turn round if `turn`, then move `dots`
+    dots the way they face. Frames swap every hop. Gone: x < -w-dots or
+    x > 280+dots, a Bubble y < -h."""
     k = load_art()["kinds"][c["kind"]]
     c = dict(c, frame=c["frame"] ^ 1)
     if k["role"] == ROLE_RISE:
-        c["y"] -= HOP
+        c["y"] -= dots
         return c, c["y"] < -k["ch"]
     if turn:
         c["dir"] ^= 1
-    c["x"] += -HOP if c["dir"] else HOP
-    return c, c["x"] < -k["cw"] - 2 or c["x"] > 282
+    c["x"] += -dots if c["dir"] else dots
+    return c, c["x"] < -k["cw"] - dots or c["x"] > 280 + dots

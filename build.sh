@@ -2,12 +2,16 @@
 # Build After Dusk: assemble, link, and write the disk image.
 #   ./build.sh                       -> build/AFTERDUSK.dsk
 #   FX_TICKS=120 OUT=build/AFTERDUSK-test.dsk ./build.sh   (short effects, for tests)
+#   FISH_HOP=4 BUILD_DIR=build/hop4 ./build.sh   Fish! with 4-dot hops (2 is the
+#                                    default); BUILD_DIR keeps the files apart
 # Needs ca65/ld65 on PATH and tools/bootstrap.sh run once (dos33fsprogs, venv).
 set -euo pipefail
 cd "$(dirname "$0")"
 
 FX_TICKS="${FX_TICKS:-10800}"
-OUT="${OUT:-build/AFTERDUSK.dsk}"
+FISH_HOP="${FISH_HOP:-2}"
+BUILD_DIR="${BUILD_DIR:-build}"
+OUT="${OUT:-$BUILD_DIR/AFTERDUSK.dsk}"
 DOS33FSPROGS="${DOS33FSPROGS:-.tools/dos33fsprogs}"
 DOS33="$DOS33FSPROGS/utils/dos33fs-utils/dos33"
 TOK="$DOS33FSPROGS/utils/asoft_basic-utils/tokenize_asoft"
@@ -18,8 +22,10 @@ PY=.tools/venv/bin/python
 # build an image from scratch: master-based images are proven on real drives
 # and the FloppyEmu.
 BASE=vendor/dos33-master-jan83.dsk
-OBJ=build/obj
+OBJ="$BUILD_DIR/obj"
 mkdir -p "$OBJ"
+# The linker layout names its output files; point them at BUILD_DIR.
+sed "s#build/#$BUILD_DIR/#" after-dusk.cfg > "$OBJ/after-dusk.cfg"
 
 # Generated sources: each tools/gen_*.py writes its own src/*.inc.
 for gen in tools/gen_*.py; do
@@ -30,17 +36,17 @@ done
 objs=()
 for src in src/main.s $(ls src/*.s | grep -v '^src/main.s$'); do
   o="$OBJ/$(basename "$src" .s).o"
-  ca65 --cpu 65C02 -g -I src -D FX_TICKS="$FX_TICKS" -o "$o" "$src"
+  ca65 --cpu 65C02 -g -I src -D FX_TICKS="$FX_TICKS" -D FISH_HOP="$FISH_HOP" -o "$o" "$src"
   objs+=("$o")
 done
-ld65 -C after-dusk.cfg -Ln build/afterdusk.lbl -m build/afterdusk.map -o build/afterdusk.bin "${objs[@]}"
+ld65 -C "$OBJ/after-dusk.cfg" -Ln "$BUILD_DIR/afterdusk.lbl" -m "$BUILD_DIR/afterdusk.map" -o "$BUILD_DIR/afterdusk.bin" "${objs[@]}"
 
 # The linker writes the resident program and the two effects files,
-# build/fx.bin and build/fx2.bin (both for $2000), and refuses anything that
+# $BUILD_DIR/fx.bin and fx2.bin (both for $2000), and refuses anything that
 # outgrows its area (after-dusk.cfg).
-size=$(wc -c < build/afterdusk.bin | tr -d ' ')
-fxsize=$(wc -c < build/fx.bin | tr -d ' ')
-fx2size=$(wc -c < build/fx2.bin | tr -d ' ')
+size=$(wc -c < "$BUILD_DIR/afterdusk.bin" | tr -d ' ')
+fxsize=$(wc -c < "$BUILD_DIR/fx.bin" | tr -d ' ')
+fx2size=$(wc -c < "$BUILD_DIR/fx2.bin" | tr -d ' ')
 
 "$TOK" < basic/hello.bas > "$OBJ/HELLO.tok"
 printf '\xb0\x8d' > "$OBJ/SEED.txt"           # "0" + Return, high-bit ASCII
@@ -49,9 +55,9 @@ cp "$BASE" "$OUT"
 "$DOS33" "$OUT" UNLOCK HELLO >/dev/null
 "$DOS33" -y "$OUT" DELETE HELLO >/dev/null
 "$DOS33" -y "$OUT" SAVE A "$OBJ/HELLO.tok" HELLO >/dev/null
-"$DOS33" -y -a 0x6000 "$OUT" BSAVE build/afterdusk.bin AFTERDUSK >/dev/null
-"$DOS33" -y -a 0x2000 "$OUT" BSAVE build/fx.bin FX >/dev/null
-"$DOS33" -y -a 0x2000 "$OUT" BSAVE build/fx2.bin FX2 >/dev/null
+"$DOS33" -y -a 0x6000 "$OUT" BSAVE "$BUILD_DIR/afterdusk.bin" AFTERDUSK >/dev/null
+"$DOS33" -y -a 0x2000 "$OUT" BSAVE "$BUILD_DIR/fx.bin" FX >/dev/null
+"$DOS33" -y -a 0x2000 "$OUT" BSAVE "$BUILD_DIR/fx2.bin" FX2 >/dev/null
 "$DOS33" -y "$OUT" SAVE T "$OBJ/SEED.txt" SEED >/dev/null
 test "$(wc -c < "$OUT" | tr -d ' ')" = 143360
 echo "built $OUT ($size bytes of program, $fxsize + $fx2size of effects, FX_TICKS=$FX_TICKS)"

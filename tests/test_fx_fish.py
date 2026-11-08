@@ -11,7 +11,7 @@ from functools import reduce
 import pytest
 
 import fishref
-from conftest import BUILD
+from conftest import BUILD, hop_build
 from fxcommon import ALLOWED, OVERHEAD, OVL, TICK, check_budget, check_in_bounds, start
 from sim import PAGE1, PAGE2, RNG, ST_FX, TICKS, row_base
 
@@ -156,6 +156,27 @@ HOP_LIMIT = 15_500              # one creature's hop must leave the rest of the 
 def r(built):
     """Fish! after init, with a snapshot of its empty sea to go back to."""
     s = start(FX, prepare=empty_sea)
+    s.empty = (s.page_bytes(PAGE1), fishref.fish_bg(s))
+    return s
+
+
+HOPS = (2, 4)           # FISH_HOP builds: dots a swimmer hops, rows a Bubble rises
+
+
+@pytest.fixture(scope="module", params=HOPS, ids=lambda h: f"hop{h}")
+def hop_size(request):
+    return request.param
+
+
+@pytest.fixture(scope="module")
+def hop_dir(built, hop_size):
+    return hop_build(hop_size)
+
+
+@pytest.fixture(scope="module")
+def rh(hop_dir):
+    """Like r, for each build's hop size."""
+    s = start(FX, prepare=empty_sea, build=hop_dir)
     s.empty = (s.page_bytes(PAGE1), fishref.fish_bg(s))
     return s
 
@@ -845,8 +866,7 @@ def is_newcomer(c):
     return c["y"] in ys and c["x"] in xs
 
 
-@pytest.fixture(scope="module")
-def spawns(r):
+def make_spawns(r):
     """20,000 spawns into slot 0, half placed anywhere and half newcomers:
     (anywhere, creature, cycles)."""
     clear(r)
@@ -859,6 +879,16 @@ def spawns(r):
     r.call("fish_bgq_reset")
     clear(r)
     return out
+
+
+@pytest.fixture(scope="module")
+def spawns(r):
+    return make_spawns(r)
+
+
+@pytest.fixture(scope="module")
+def spawns_h(rh):
+    return make_spawns(rh)
 
 
 def test_rng_model_is_the_cores(r):
@@ -928,22 +958,28 @@ def test_bubble_x_covers_its_range(r):
     assert sum(x >= 256 for x in xs) > len(xs) / 260 * 8 * 0.5
 
 
-def test_kinds_and_beats_are_even(spawns):
+def test_kinds_and_beats_are_even(spawns_h, hop_size):
+    """Beats scale with the hop (4, 4, 5, 6 ticks at 2 dots; 8, 8, 10, 12 at
+    4), Bubbles' too (3; 6)."""
+    spawns = spawns_h
     n = len(spawns)
     kinds = Counter(c["kind"] for _, c, _ in spawns)
     for k in range(14):
         assert abs(kinds[k] / n - 1 / 14) <= 0.015, (k, kinds[k])
     beats = Counter(c["beat"] for _, c, _ in spawns if c["kind"] != BUBBLES)
     m = sum(beats.values())
-    assert set(beats) == {4, 5, 6}
-    for beat, share in ((4, 0.5), (5, 0.25), (6, 0.25)):
+    (b4, b5, b6), bubble = fishref.beats(hop_size)
+    assert set(beats) == {b4, b5, b6}
+    for beat, share in ((b4, 0.5), (b5, 0.25), (b6, 0.25)):
         assert abs(beats[beat] / m - share) <= 0.03, beats
-    assert {c["beat"] for _, c, _ in spawns if c["kind"] == BUBBLES} == {3}
+    assert {c["beat"] for _, c, _ in spawns if c["kind"] == BUBBLES} == {bubble}
 
 
-def test_hop_moves_two_dots_and_swaps_frames(r):
-    """x += 2 * (1 - 2 * dir) after any turn, frame ^= 1, y unchanged; the
-    turn is rng_below(42) = 0; the rect is the old box joined with the new."""
+def test_hop_moves_and_swaps_frames(rh, hop_size):
+    """x += hop * (1 - 2 * dir) after any turn, frame ^= 1, y unchanged; the
+    turn is rng_below(42) = 0; the rect is the old box joined with the new
+    (at most 8 bytes wide, though a join can be hop dots wider than a box)."""
+    r = rh
     rnd = random.Random(61)
     swimmers = [k for k in range(14) if role(k) < ROLE_STILL]
     turns = 0
@@ -952,7 +988,7 @@ def test_hop_moves_two_dots_and_swaps_frames(r):
         ys, _ = fishref.band(kind, True)
         old = dict(kind=kind, frame=rnd.randrange(2), dir=rnd.randrange(2),
                    x=rnd.randrange(-30, 290), y=rnd.choice(ys))
-        if fishref.hop(old, False)[1] or fishref.hop(old, True)[1]:
+        if fishref.hop(old, False, hop_size)[1] or fishref.hop(old, True, hop_size)[1]:
             continue
         clear(r)
         place(r, [tuple(old.values())])
@@ -962,7 +998,7 @@ def test_hop_moves_two_dots_and_swaps_frames(r):
         rect, _ = hop(r, 0)
         new = fishref.creatures(r)[0]
         nd = old["dir"] ^ turn
-        assert new == dict(old, frame=old["frame"] ^ 1, dir=nd, x=old["x"] + 2 * (1 - 2 * nd)), old
+        assert new == dict(old, frame=old["frame"] ^ 1, dir=nd, x=old["x"] + hop_size * (1 - 2 * nd)), old
         assert r.peek16(RNG) == model.lo | model.hi << 8
         assert rect == hop_rect(old, new, False)[0], (old, new)
         if rect:
@@ -1005,7 +1041,8 @@ def test_turns_about_one_in_42(r):
     r.call("fish_bgq_reset")
 
 
-def test_newcomers_enter_facing_inward(spawns):
+def test_newcomers_enter_facing_inward(spawns_h):
+    spawns = spawns_h
     sides = Counter()
     for anywhere, c, _ in spawns:
         if anywhere or role(c["kind"]) >= ROLE_STILL:
@@ -1016,21 +1053,23 @@ def test_newcomers_enter_facing_inward(spawns):
     assert abs(sides[0] / sum(sides.values()) - 0.5) <= 0.03, sides
 
 
-def test_leaving_and_replacing(r):
-    """Swimmers go once x < -w-2 or x > 282, Bubbles once y < -h, turning or
-    not, and a newcomer takes the slot; the rect and the queue are as
-    hop_rect says (a Bubble's last row can still show when it goes)."""
+def test_leaving_and_replacing(rh, hop_size):
+    """Swimmers go once x < -w-hop or x > 280+hop, Bubbles once y < -h,
+    turning or not, and a newcomer takes the slot; the rect and the queue are
+    as hop_rect says (a Bubble's last row can still show when it goes)."""
+    r = rh
+    h = hop_size
     seen = Counter()
     for kind in range(14):
         k = kind_of(kind)
         if k["role"] == ROLE_STILL:
             continue
         if k["role"] == ROLE_RISE:
-            starts = [(0, x, y) for x in (4, 130, 263) for y in range(-k["ch"] - 2, -k["ch"] + 5)]
+            starts = [(0, x, y) for x in (4, 130, 263) for y in range(-k["ch"] - 2, -k["ch"] + h + 3)]
         else:
             y = fishref.band(kind, True)[0][0]
             starts = [(d, x, y) for d in (0, 1)
-                      for x in list(range(-k["cw"] - 6, -k["cw"] + 3)) + list(range(276, 287))]
+                      for x in list(range(-k["cw"] - h - 4, -k["cw"] - h + 5)) + list(range(274 + h, 285 + h))]
         for d, x, y in starts:
             for turn in (False, True):
                 for frame in (0, 1):
@@ -1040,7 +1079,7 @@ def test_leaving_and_replacing(r):
                     old = fishref.creatures(r)[0]
                     r.poke16(RNG, rng_for(turn, 1 + 97 * seen["hops"]))
                     seen["hops"] += 1
-                    want, gone = fishref.hop(old, turn and k["role"] != ROLE_RISE)
+                    want, gone = fishref.hop(old, turn and k["role"] != ROLE_RISE, h)
                     rect, _ = hop(r, 0)
                     new = fishref.creatures(r)[0]
                     if gone:
@@ -1056,18 +1095,20 @@ def test_leaving_and_replacing(r):
     assert seen["gone"] > 100 and seen["old box shows"] > 2, seen
 
 
-def test_bubbles_rise_two_rows(r):
-    """y -= 2 a hop, frames swap, x stays, never mirrored, no random draw."""
+def test_bubbles_rise_a_hop(rh, hop_size):
+    """y -= hop (2 or 4 rows) a hop, frames swap, x stays, never mirrored, no
+    random draw."""
+    r = rh
     for frame in (0, 1):
         for x in (4, 100, 263):
             clear(r)
             place(r, [(BUBBLES, frame, 0, x, 152)])
-            for i in range(1, 40):
+            for i in range(1, 78 // hop_size + 1):
                 old = fishref.creatures(r)[0]
                 rng = r.peek16(RNG)
                 rect, _ = hop(r, 0)
                 new = fishref.creatures(r)[0]
-                assert new == dict(old, y=152 - 2 * i, frame=frame ^ (i & 1)), (x, i)
+                assert new == dict(old, y=152 - hop_size * i, frame=frame ^ (i & 1)), (x, i)
                 assert r.peek16(RNG) == rng
                 assert rect == hop_rect(old, new, False)[0]
                 assert not fishref.mirrored(new)
@@ -1177,14 +1218,14 @@ def test_init_places_and_draws_the_set(built):
         assert queue(s) == [] and pop(s) is None
 
 
-def test_incremental_equals_full(built):
+def test_incremental_equals_full(hop_dir, hop_size):
     """6 creatures, 3,000 hops in random slot order through fish_hop and its
     rect, and fish_weed (often due to sway or go), each queued job drained:
     after each, page 1 and FISH_BG are as the composition rule has them."""
     def prepare(s):
         junk(s)
         s.poke(s.addr("fish_count"), 6)
-    s = start(FX, seed=0x5EED, prepare=prepare)
+    s = start(FX, seed=0x5EED, prepare=prepare, build=hop_dir)
     # three Seaweeds (two stacked), a Bubble near the top and a Crab among the rest
     for i, (kind, x, y) in ((0, (SEAWEED, 120, 156)), (1, (SEAWEED, 128, 156)),
                             (2, (BUBBLES, 125, 6)), (3, (CRAB, 100, 158)),
@@ -1219,7 +1260,7 @@ def test_incremental_equals_full(built):
                 seen["sway" if v < 0.4 else "tick"] += 1
         else:
             turn = role(c["kind"]) != ROLE_RISE and fishref.Rng(s.peek16(RNG)).below(42) == 0
-            want, gone = fishref.hop(c, turn)
+            want, gone = fishref.hop(c, turn, hop_size)
             rect, _ = hop(s, i)
             new = fishref.creatures(s)[i]
             if rect:
@@ -1399,21 +1440,35 @@ def weight(s, i):
     return s.peek(s.addr("fish_w") + i)
 
 
+def start_h(hop_dir, hop, **kw):
+    """start() in a build with `hop`-dot hops; the sim remembers the hop."""
+    s = start(FX, build=hop_dir, **kw)
+    s.hop = hop
+    return s
+
+
+def cycle(s):
+    """The step's load cycle in ticks: 60, or 120 for 4-dot hops."""
+    return 30 * getattr(s, "hop", 2)
+
+
 def load_of(s):
     """fish_load as the creatures have it: each one's weight on every tick
-    of the 60 that its hops fall on (its due tick, mod its beat)."""
-    load = [0] * 60
+    of the cycle that its hops fall on (its due tick, mod its beat)."""
+    load = [0] * cycle(s)
     for i, _, beat in hopping(s):
-        for t in range(due(s, i) % beat, 60, beat):
+        for t in range(due(s, i) % beat, cycle(s), beat):
             load[t] = (load[t] + weight(s, i)) & 0xFF
     return load
 
 
 def quietest(load, first, beat):
     """The p (0..beat-1) whose busiest tick, first + p and every beat ticks
-    on round the 60, is the quietest; ties: the smallest p."""
+    on round the cycle, is the quietest; ties: the smallest p."""
+    n = len(load)
+
     def busiest(p):
-        return max(load[(first + p + k * beat) % 60] for k in range(60 // beat))
+        return max(load[(first + p + k * beat) % n] for k in range(n // beat))
     return min(range(beat), key=lambda p: (busiest(p), p))
 
 
@@ -1424,7 +1479,7 @@ def counters(s):
                 over=s.peek16(a("fish_bgq_over")), busy=s.peek16(a("fish_bg_busy_max")))
 
 
-def hops_on(c, k):
+def hops_on(c, k, hop=2):
     """(every place k hops can take creature c, turning or not, and whether
     any of up to k hops takes it off)."""
     now_, gone = [c], False
@@ -1432,7 +1487,7 @@ def hops_on(c, k):
         nxt = []
         for c_ in now_:
             for turn in ((False,) if role(c_["kind"]) == ROLE_RISE else (False, True)):
-                new, off = fishref.hop(c_, turn)
+                new, off = fishref.hop(c_, turn, hop)
                 gone |= off
                 if not off and new not in nxt:
                     nxt.append(new)
@@ -1445,14 +1500,16 @@ def watch(s, steps):
     Returns (cycles per step, problems)."""
     problems = []
     t = now(s)
-    load = [0] * 60                     # init's arrivals, in slot order
+    n = cycle(s)
+    hop = n // 30
+    load = [0] * n                      # init's arrivals, in slot order
     for i, c, beat in hopping(s):
         p = due(s, i) - t - 1
         if not 0 <= p < beat or p != quietest(load, t + 1, beat):
             problems.append(("init's first due", i, c, due(s, i), beat))
-        for k in range(60 // beat):
-            load[(t + 1 + p + k * beat) % 60] += weight(s, i)
-    if load != load_of(s) or bytes(load) != mem(s, "fish_load", 60):
+        for k in range(n // beat):
+            load[(t + 1 + p + k * beat) % n] += weight(s, i)
+    if load != load_of(s) or bytes(load) != mem(s, "fish_load", n):
         problems.append(("init's fish_load",))
     lives = {i: [due(s, i), beat, 0] for i, _, beat in hopping(s)}   # first due, beat, hops
     cycles = []
@@ -1466,7 +1523,7 @@ def watch(s, steps):
     for step in range(steps):
         before = [(c, due(s, i), s.peek(s.addr("fish_beat") + i), weight(s, i))
                   for i, c in enumerate(fishref.creatures(s))]
-        load0 = list(mem(s, "fish_load", 60))
+        load0 = list(mem(s, "fish_load", n))
         cycles.append(s.step())
         t = now(s)
         after = fishref.creatures(s)
@@ -1482,12 +1539,12 @@ def watch(s, steps):
             if c1 == c0:
                 if d1 != d0:
                     problems.append(("due moved without a hop", step, i, d0, d1))
-            elif k and c1 in hops_on(c0, k)[0]:
+            elif k and c1 in hops_on(c0, k, hop)[0]:
                 lives[i][2] += k            # (one far behind can catch up two at once)
                 if d0 + (k - 1) * b0 > t:
                     problems.append(("hop", step, i, t, d0, d1, b0))
             else:
-                if not hops_on(c0, 4)[1] or d0 > t or not is_newcomer(c1):
+                if not hops_on(c0, 4, hop)[1] or d0 > t or not is_newcomer(c1):
                     problems.append(("left", step, i, c0, c1, d0, t))
                 lives[i][2] += 1
                 pace(i, t)
@@ -1502,41 +1559,41 @@ def watch(s, steps):
             elif len(renewed) == 1:
                 seen = list(load0)          # what it saw: less the one that left
                 if role(c0["kind"]) != ROLE_STILL:
-                    for k in range(d0 % b0, 60, b0):
+                    for k in range(d0 % b0, n, b0):
                         seen[k] = (seen[k] - w0) & 0xFF
                 if d1 - t - 1 != quietest(seen, t + 1, beat):
                     problems.append(("spread", step, i, t, d1, beat))
             lives[i] = [d1, beat, 0]
-        if t % 500 == 0 and bytes(load_of(s)) != mem(s, "fish_load", 60):
+        if t % 500 == 0 and bytes(load_of(s)) != mem(s, "fish_load", n):
             problems.append(("fish_load", step))
     for i in list(lives):
         pace(i, now(s))
-    if bytes(load_of(s)) != mem(s, "fish_load", 60):
+    if bytes(load_of(s)) != mem(s, "fish_load", n):
         problems.append(("fish_load at the end",))
     return cycles, problems
 
 
 @pytest.fixture(scope="module")
-def fuzz(built):
-    """Fish! at fish_count, 6 seeds x 6,000 steps, watched: per seed, the
-    step's counters, its cycles and how each creature kept its beat."""
+def fuzz(hop_dir, hop_size):
+    """Fish! at fish_count, 6 seeds x 6,000 steps, watched, in each build: per
+    seed, the step's counters, its cycles and how each creature kept its beat."""
     out = {}
     for seed in SEEDS:
-        s = start(FX, seed=seed)
+        s = start_h(hop_dir, hop_size, seed=seed)
         cycles, problems = watch(s, 6000)
         out[seed] = dict(counters(s), cycles=cycles, problems=problems)
     return out
 
 
-def test_budget(built):
-    worst, median = check_budget(FX, steps=3000)
+def test_budget(hop_dir):
+    worst, median = check_budget(FX, steps=3000, build=hop_dir)
     print(f"\nworst step {worst} cycles, median {median} (limits {HARD}, {TICK * 0.85:.0f})")
 
 
-def test_in_bounds(built):
+def test_in_bounds(hop_dir):
     """Writes only its own memory; never bit 7 on page 1 (page 2 holds its
     art and code, and is never shown)."""
-    s = check_in_bounds(FX, steps=3000)
+    s = check_in_bounds(FX, steps=3000, build=hop_dir)
     assert all(b & 0x80 == 0 for b in s.page_bytes(PAGE1))
 
 
@@ -1748,7 +1805,7 @@ def clean(s, why):
     assert queue(s) == [], why
     for i, _, beat in hopping(s):
         assert 1 <= due(s, i) <= beat, why
-    assert mem(s, "fish_load", 60) == bytes(load_of(s)), why
+    assert mem(s, "fish_load", cycle(s)) == bytes(load_of(s)), why
     assert fishref.fish_bg(s) == fishref.expected_bg(s), why
     assert s.page_bytes(PAGE1) == fishref.expected_page(s), why
 
@@ -1762,11 +1819,11 @@ def busy_fish(s):
     raise AssertionError("never busy")
 
 
-def test_second_run_starts_clean(built):
+def test_second_run_starts_clean(hop_dir, hop_size):
     """Review Focus 2: Fish! runs 500 steps and stops mid-work; Zot! and the
     toasters run (they write over page 2 and FXRAM); Fish! starts again clean.
     And again after Ctrl-Reset (restart) while Fish! was mid-work."""
-    s = start(FX, seed=0x5EED)
+    s = start_h(hop_dir, hop_size, seed=0x5EED)
     for _ in range(500):
         s.step()
     busy_fish(s)

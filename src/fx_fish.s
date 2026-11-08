@@ -14,6 +14,16 @@
 
 .include "config.inc"
 
+; The hop size is a build setting: FISH_HOP=4 ./build.sh (ca65 -D FISH_HOP=4)
+; makes every swimmer move 4 dots and every Bubble rise 4 rows a hop, on beats
+; twice as long, so the speed is the same; the default is 2.
+.ifndef FISH_HOP
+FISH_HOP = 2
+.endif
+.assert FISH_HOP = 2 || FISH_HOP = 4, error, "FISH_HOP must be 2 or 4"
+FISH_CYCLE = 30 * FISH_HOP      ; the step's load cycle in ticks: the beats
+                                ;   (3-6 at 2 dots, 6-12 at 4) all divide it
+
 .export fish_init, fish_step
 .export FISH_BG, FISH_CODE2, FISH_SHT, FISH_REV, FISH_IREV, FLOOR_TOP
 .export fish_n, fish_kind, fish_frame, fish_dir, fish_xl, fish_xh, fish_yl, fish_yh
@@ -249,13 +259,13 @@ ROLE_RISE = 5                   ; Bubbles
 mv_ymax:  .byte 182, 30, 191, 168, 192, 156, 152
 mv_ymh:   .byte $FF, 0, $FF, $FF, $FF, 0, 0
 mv_span:  .byte 181, 31, 4, 9, 1, 157, 1
-mv_beats: .byte 4, 4, 5, 6
-mv_dxl:   .byte <2, <-2         ; a hop: 2 dots the way it faces
-mv_dxh:   .byte >2, >-2
+mv_beats: .byte 2 * FISH_HOP, 2 * FISH_HOP, 5 * FISH_HOP / 2, 3 * FISH_HOP
+mv_dxl:   .byte <FISH_HOP, <-FISH_HOP   ; a hop: FISH_HOP dots the way it faces
+mv_dxh:   .byte >FISH_HOP, >-FISH_HOP
 
 ; fish_spawn: X = slot, A = 1 to place it anywhere (init), 0 for a newcomer.
-; Picks its kind (all 14 alike), frame, beat (4, 4, 5 or 6 ticks; Bubbles
-; 3), heading (swimmers only; the rest face right) and place by its band. A
+; Picks its kind (all 14 alike), frame, beat (4, 4, 5 or 6 ticks, twice
+; that for 4-dot hops; Bubbles 3, or 6), heading (swimmers only; the rest face right) and place by its band. A
 ; newcomer swimmer enters just off a side, facing in (x = -w heading right,
 ; 280 heading left); a newcomer Bubble 4 rows above the floor. x anywhere:
 ; 0..280-w (Bubbles 4..280-w-4). A Seaweed also gets its life ((20 +
@@ -288,7 +298,7 @@ fish_spawn:
         lda fk_role,y
         cmp #ROLE_RISE
         bne @role
-        lda #3                  ; Bubbles hop every 3 ticks
+        lda #3 * FISH_HOP / 2   ; Bubbles hop every 3 ticks (6 for 4-dot hops)
         sta fish_beat,x
         lda MV_MODE
         eor #1                  ; a newcomer: role 6
@@ -400,9 +410,10 @@ fish_rnd:
         rts
 
 ; fish_hop: X = slot (never a Seaweed: Task 5's picker skips them). One hop:
-; its frames swap; a Bubble rises 2 rows; the rest turn round 1 time in 42
-; (rng_below(42) = 0), then move 2 dots the way they face. One that has
-; gone (a swimmer once x < -w-2 or x > 282, a Bubble once y < -h) is
+; its frames swap; a Bubble rises FISH_HOP rows; the rest turn round 1 time in
+; 42 (rng_below(42) = 0), then move FISH_HOP dots the way they face. One that
+; has gone (a swimmer once x < -w-FISH_HOP or x > 280+FISH_HOP, a Bubble once
+; y < -h) is
 ; replaced by a newcomer (fish_spawn, A = 0). Leaves the rect to redraw in
 ; FR_C0..FR_R1 and carry set, or carry clear if none of it shows: the old
 ; box joined with the new one, clipped (at most 8 bytes wide). For one that
@@ -424,9 +435,9 @@ fish_hop:
         lda fk_role,y
         cmp #ROLE_RISE
         bne @swim
-        lda fish_yl,x           ; a Bubble rises 2 rows
+        lda fish_yl,x           ; a Bubble rises FISH_HOP rows
         sec
-        sbc #2
+        sbc #FISH_HOP
         sta fish_yl,x
         bcs :+
         dec fish_yh,x
@@ -443,7 +454,7 @@ fish_hop:
         lda fish_dir,x
         eor #1
         sta fish_dir,x
-:       ldy fish_dir,x          ; 2 dots the way it faces
+:       ldy fish_dir,x          ; FISH_HOP dots the way it faces
         lda fish_xl,x
         clc
         adc mv_dxl,y
@@ -451,20 +462,20 @@ fish_hop:
         lda fish_xh,x
         adc mv_dxh,y
         sta fish_xh,x
-        ldy fish_kind,x         ; gone once x + w + 2 < 0
+        ldy fish_kind,x         ; gone once x + w + FISH_HOP < 0
         lda fk_cw,y
         sec
-        adc #1
+        adc #FISH_HOP - 1
         adc fish_xl,x
         lda fish_xh,x
         adc #0
         bmi @gone
-        lda fish_xh,x           ; or x > 282
+        lda fish_xh,x           ; or x > 280 + FISH_HOP
         bmi @new
         lda fish_xl,x
-        cmp #<283
+        cmp #<(281 + FISH_HOP)
         lda fish_xh,x
-        sbc #>283
+        sbc #>(281 + FISH_HOP)
         bcs @gone
 @new:   jsr fish_box            ; the new box
         bcc @old
@@ -700,7 +711,7 @@ fish_count: .byte 6
 
 ; ================================================================ the step
 ; Every tick:
-;  1. now += 1 (now60 round the 60), and the tick's budget: FR_LEFT =
+;  1. now += 1 (now60 round the load cycle), and the tick's budget: FR_LEFT =
 ;     STEP_UNITS, in the renderer's units of 16 cycles.
 ;  2. Every Seaweed's tick (fish_weed), even with a rect pending.
 ;  3. A creature rect left half drawn goes on; if it still doesn't finish,
@@ -716,21 +727,22 @@ fish_count: .byte 6
 ;     pending. Then the next rect, while the budget lasts.
 ; Every call is paid for from FR_LEFT before it runs (or, for a begin, from
 ; room kept for its worst), by costs measured at their worst: no step runs
-; past its tick. Hops are spread over the 60-tick cycle as creatures arrive
-; (beats 3-6 all divide 60): fish_load sums each tick's hop estimates.
+; past its tick. Hops are spread over the load cycle, 60 ticks (120 for 4-dot
+; hops: beats 8 don't divide 60) as creatures arrive: fish_load sums each
+; tick's hop estimates. (The names say 60; FISH_CYCLE is the count.)
 
 ; ---- the step's state, after the motion state ----
-fish_now60  = FISH_MV_END       ; now mod 60
+fish_now60  = FISH_MV_END       ; now mod FISH_CYCLE (60 or 120)
 fish_duel   = fish_now60 + 1    ; 10 each: the tick its next hop is due,
 fish_dueh   = fish_duel + FISH_MAX
-fish_base60 = fish_dueh + FISH_MAX      ;   that mod 60 when it arrived,
+fish_base60 = fish_dueh + FISH_MAX      ;   that mod the cycle when it arrived,
 fish_sbeat  = fish_base60 + FISH_MAX    ;   its beat then (fish_load's spacing),
 fish_cost   = fish_sbeat + FISH_MAX     ;   its hop's estimate (units),
 fish_costh  = fish_cost + FISH_MAX
 fish_w      = fish_costh + FISH_MAX     ;   and its weight in fish_load (0: none)
 ST_CLEAR    = fish_w + FISH_MAX ; from here to ST_CLEAR_END, zeroed by init:
-fish_load   = ST_CLEAR          ; 60: weights of the hops due on each tick mod 60
-fish_pending = fish_load + 60   ; 1 while a creature rect is half drawn
+fish_load   = ST_CLEAR          ; FISH_CYCLE: weights of the hops due on each tick mod it
+fish_pending = fish_load + FISH_CYCLE   ; 1 while a creature rect is half drawn
 fish_late_max = fish_pending + 1        ; the latest any hop has been (ticks)
 fish_hops   = fish_late_max + 1 ; 2: hops,
 fish_late   = fish_hops + 2     ; 2: and how many were late
@@ -794,7 +806,7 @@ fish_step:
         inc fish_now+1
 :       ldy fish_now60
         iny
-        cpy #60
+        cpy #FISH_CYCLE
         bcc :+
         ldy #0
 :       sty fish_now60
@@ -1014,7 +1026,8 @@ st_hop: pha
 
 ; may_go: X = slot. A (low), Y (high) = its hop's cost at its worst:
 ; HOP_GONE + ARR_UNITS if this hop may take it off (a swimmer at x < -w or
-; x > 280, a Bubble at y + h < 2), else HOP_STAY.
+; x > 280, whichever way it turns, for either hop size; a Bubble at
+; y + h < FISH_HOP), else HOP_STAY.
 may_go: ldy fish_kind,x
         lda fk_role,y
         cmp #ROLE_RISE
@@ -1027,7 +1040,7 @@ may_go: ldy fish_kind,x
         adc #0
         bmi @go
         bne @stay
-        cpy #2
+        cpy #FISH_HOP
         bcc @go
         bra @stay
 @swim:  lda fish_xh,x
@@ -1111,8 +1124,8 @@ arrive: stz fish_w,x
         sta ST_BM
         stz ST_P
         ldy fish_now60
-@p:     iny                     ; tick now + 1 + p, mod 60
-        cpy #60
+@p:     iny                     ; tick now + 1 + p, mod the cycle
+        cpy #FISH_CYCLE
         bcc :+
         ldy #0
 :       jsr walk_max
@@ -1141,26 +1154,26 @@ arrive: stz fish_w,x
         jmp walk_add
 
 ; walk_add: fish_load += ST_W at tick Y and every ST_B ticks on, round the
-; 60. Keeps X.
+; cycle. Keeps X.
 walk_add:
         sty ST_T
 @t:     lda fish_load,y
         clc
         adc ST_W
         sta fish_load,y
-        tya                     ; ST_B ticks on, round the 60
+        tya                     ; ST_B ticks on, round the cycle
         clc
         adc ST_B
-        cmp #60
+        cmp #FISH_CYCLE
         bcc :+
-        sbc #60
+        sbc #FISH_CYCLE
 :       tay
         cpy ST_T
         bne @t
         rts
 
 ; walk_max: A = the most fish_load holds on tick Y or any ST_B ticks on,
-; round the 60. Keeps X and Y.
+; round the cycle. Keeps X and Y.
 walk_max:
         sty ST_T
         stz ST_M
@@ -1168,12 +1181,12 @@ walk_max:
         cmp ST_M
         bcc :+
         sta ST_M
-:       tya                     ; ST_B ticks on, round the 60
+:       tya                     ; ST_B ticks on, round the cycle
         clc
         adc ST_B
-        cmp #60
+        cmp #FISH_CYCLE
         bcc :+
-        sbc #60
+        sbc #FISH_CYCLE
 :       tay
         cpy ST_T
         bne @t

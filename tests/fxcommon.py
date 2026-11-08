@@ -20,11 +20,11 @@ def fx_entry(s, fx):
     return OVL, OVL + 3, s.peek(base + 4), s.peek(base + 5)
 
 
-def start(fx, seed=0x4D2A, prepare=None):
+def start(fx, seed=0x4D2A, prepare=None, build=None):
     """A Sim set up as After Dusk is after start-up (effects in aux memory,
     sprites and tables built), with effect `fx` loaded and initialised as the
-    randomizer would."""
-    s = Sim().load_effects()
+    randomizer would. `build` is the build directory (default: build/)."""
+    s = Sim(**({"build": build} if build else {})).load_effects()
     s.poke(ST_TIMING, 0)
     s.mem.ram[0xFFFA:0x10000] = bytes(6)
     s.call("sprite_setup", max_cycles=3_000_000)
@@ -52,15 +52,15 @@ TICK = 17030
 OVERHEAD = 300          # the randomizer's own work per step, plus the tick wait
 
 
-def check_budget(fx, steps=300, seeds=(0x4D2A, 0x1357, 0xBEEF)):
+def check_budget(fx, steps=300, seeds=(0x4D2A, 0x1357, 0xBEEF), build=None):
     """Every step must finish inside its ticks (so the IIc never slips a frame),
     and the typical step must stay under the 85% budget, leaving headroom."""
-    s = start(fx)
+    s = start(fx, build=build)
     ticks = fx_entry(s, fx)[3]
     hard = ticks * TICK - OVERHEAD
     cycles = []
     for seed in seeds:
-        s = start(fx, seed=seed)
+        s = start(fx, seed=seed, build=build)
         cycles += [s.step() for _ in range(steps)]
     worst = max(cycles)
     median = sorted(cycles)[len(cycles) // 2]
@@ -70,8 +70,8 @@ def check_budget(fx, steps=300, seeds=(0x4D2A, 0x1357, 0xBEEF)):
     return worst, median
 
 
-def check_in_bounds(fx, steps=300):
-    s = start(fx)
+def check_in_bounds(fx, steps=300, build=None):
+    s = start(fx, build=build)
     s.start_tracking()
     run(s, steps)
     assert s.writes_outside(*ALLOWED) == []

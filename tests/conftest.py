@@ -28,3 +28,14 @@ def labels(path=None):
         if len(parts) == 3 and parts[0] == "al":
             out[parts[2].lstrip(".")] = int(parts[1], 16)
     return out
+
+
+def hop_build(hop):
+    """The build directory for Fish! with `hop`-dot hops: build/ for the
+    default 2, build/hop4/ (built on first use, files apart) for 4."""
+    if hop == 2:
+        return BUILD
+    path = BUILD / f"hop{hop}"
+    subprocess.run(["./build.sh"], cwd=ROOT, check=True, capture_output=True, text=True,
+                   env=dict(os.environ, FISH_HOP=str(hop), BUILD_DIR=f"build/hop{hop}"))
+    return path

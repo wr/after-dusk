@@ -86,13 +86,14 @@ def row_base(y, page=PAGE1):
 
 
 class Sim:
-    def __init__(self, path=None):
-        path = Path(path or BUILD / "afterdusk.bin")
+    def __init__(self, path=None, build=BUILD):
+        self.build = Path(build)
+        path = Path(path or self.build / "afterdusk.bin")
         self.mem = Mem()
         self.mpu = MPU(memory=self.mem)
         data = path.read_bytes()
         self.mem.ram[0x6000:0x6000 + len(data)] = data
-        self.labels = labels()
+        self.labels = labels(self.build / "afterdusk.lbl")
 
     # ---- memory ----
     def peek(self, a):
@@ -113,10 +114,10 @@ class Sim:
         """As HELLO and start do: the FX2 file at $2000, copied to aux $6000;
         the FX file at $2000, copied to aux $2000; both pages cleared, and the
         aux copy loop in the language card."""
-        data = (BUILD / "fx2.bin").read_bytes()
+        data = (self.build / "fx2.bin").read_bytes()
         self.mem.ram[0x2000:0x2000 + len(data)] = data
         self.call("fx2_stash", max_cycles=2_000_000)
-        data = (BUILD / "fx.bin").read_bytes()
+        data = (self.build / "fx.bin").read_bytes()
         self.mem.ram[0x2000:0x2000 + len(data)] = data
         self.call("fx_stash", max_cycles=2_000_000)
         self.mem.ram[0x2000:0x6000] = bytes(0x4000)
