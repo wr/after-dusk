@@ -54,6 +54,9 @@ def kinds():
         ys = [y for m in masks for y, r in enumerate(m) if any(r)]
         bx, by = min(xs), min(ys)
         bw, bh = max(xs) - bx + 1, max(ys) - by + 1
+        # so that fish_hop's old box joined with its new one fits the
+        # renderer's 8 bytes
+        assert bw <= 48, f"{name}: box {bw} dots wide, past 48"
         wb = -(-bw // 7)
         frames = []
         for c, m in zip(canv, masks):

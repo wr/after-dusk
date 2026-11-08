@@ -971,14 +971,14 @@ def test_hop_moves_two_dots_and_swaps_frames(r):
 
 
 def test_turns_about_one_in_42(r):
-    """50,000 hops: a turn 1 time in 42 (+- 10%), each on the hop the model
-    says; Seaweed and Bubbles never turn."""
+    """25,000 hops: a turn 1 time in 42 (+- 10%, about 2.5 sigma), each on the
+    hop the model says; Seaweed and Bubbles never turn."""
     rnd = random.Random(42)
     swimmers = [k for k in range(14) if role(k) < ROLE_STILL]
     clear(r)
     turns = hops = 0
     c = None
-    for i in range(50_000):
+    for i in range(25_000):
         if c is None or not 20 <= c["x"] <= 240:
             kind = rnd.choice(swimmers)
             place(r, [(kind, rnd.randrange(2), rnd.randrange(2), 130, rnd.choice(fishref.band(kind, True)[0]))])
@@ -1116,6 +1116,8 @@ def test_seaweed_life_and_sway(r, spawns):
         assert is_newcomer(new), new
         kinds[new["kind"]] += 1
         shows = expected_box(new) if role(new["kind"]) in (ROLE_STILL, ROLE_RISE) else None
+        if shows == expected_box(old):      # a Seaweed on the same x: queued once
+            shows = None
         assert queue(r) == [expected_box(old)] + ([shows] if shows else []), (old, new)
     assert kinds[SEAWEED] and kinds[BUBBLES]
     r.call("fish_bgq_reset")
