@@ -12,8 +12,8 @@ import pytest
 
 import fishref
 from conftest import BUILD, hop_build
-from fxcommon import ALLOWED, ALLOWED_AUX, FISH_ALLOWED, OVERHEAD, OVL, TICK, check_budget, check_in_bounds, start
-from sim import PAGE1, PAGE2, RNG, ST_FX, ST_TIMING, TICKS, Sim, row_base
+from fxcommon import ALLOWED, FISH_ALLOWED, FISH_ALLOWED_AUX, OVERHEAD, OVL, TICK, check_budget, check_in_bounds, start
+from sim import VblLatch, PAGE1, PAGE2, RNG, ST_FX, ST_TIMING, TICKS, Sim, row_base
 
 FX = 14
 FLOOR_TOP = 156
@@ -142,7 +142,7 @@ def test_init_writes_only_its_own_memory(built):
         s.start_tracking()
     s = start(FX, prepare=track)
     assert s.writes_outside(*ALLOWED, *FISH_ALLOWED) == []
-    assert s.aux_writes_outside(*ALLOWED_AUX) == []
+    assert s.aux_writes_outside(*FISH_ALLOWED_AUX) == []
     assert not s.mem.rd_aux and not s.mem.wr_aux
 
 
@@ -263,7 +263,7 @@ def redraw(s, rect, left=0xFFFF):
     cycles = s.call("fish_rect_begin")
     assert s.peek(s.addr("FR_ROW")) == rect[2]
     s.poke16(s.addr("FR_LEFT"), left)
-    cycles += s.call("fish_rect_rows", max_cycles=200_000)
+    cycles += s.call("fish_rect_rows", max_cycles=600_000)     # (a full-height rect in a crowd, with builds)
     return cycles, s.carry()
 
 
@@ -667,6 +667,9 @@ def test_resumes_anywhere(r):
         rect = (c0, min(c0 + rnd.randrange(1, 9), 40), r0, min(r0 + rnd.randrange(1, 41), 192))
         if trial % 7 == 0:
             rect = (c0, min(c0 + 8, 40), 0, 192)
+        elif trial % 7 == 3:            # tall: runs of 64-156 rows over black, and the floor's
+            r0 = rnd.randrange(0, 100)
+            rect = (c0, min(c0 + rnd.randrange(1, 9), 40), r0, min(r0 + rnd.randrange(64, 193), 192))
         # one call
         page0 = r.page_bytes(PAGE1)
         assert redraw(r, rect)[1]
@@ -680,6 +683,8 @@ def test_resumes_anywhere(r):
         calls = 0
         while True:
             left = rnd.choice((rnd.randrange(1, 40), rnd.randrange(40, 300), rnd.randrange(300, 1200)))
+            if trial % 7 == 3 and rnd.randrange(3) == 0:    # (tall: budgets that leave 64+ rows part-drawn)
+                left = rnd.randrange(1200, 4000)
             row = r.peek(r.addr("FR_ROW"))
             cycles, units, done = charged(r, "fish_rect_rows", left)
             calls += 1
@@ -998,9 +1003,10 @@ def test_pieces_are_tight(r):
     CALL_VAR = 8 + 164                  # a call that draws costs 92-167; one that stops at a set-up of
                                         # four or more layers 244 (FC_CALL pays the dearest stop); and
                                         # a stop at a run's second charge wastes its first (16 x detail)
-    BGCALL_VAR = 8 + 160                # a background call that draws costs 184 carrying its run on, 297
+    BGCALL_VAR = 8 + 160 + 26           # a background call that draws costs 184 carrying its run on, 297
                                         # listing afresh; one that stops at a set-up of four or more
-                                        # layers 160 more (FC_BGCALL pays it); listing afresh: 15 of
+                                        # layers 160 more, and a IIc's slowest poll 26 more (FC_BGCALL
+                                        # pays both); listing afresh: 15 of
                                         # rounding, a Seaweed listed 123 (charged 128), one elsewhere
                                         # 73, another slot 32 (charged 48)
 
@@ -1028,6 +1034,9 @@ def test_pieces_are_tight(r):
             c0 = 13 + rnd.randrange(3)
         r0 = rnd.randrange(192)
         rect = (c0, min(c0 + rnd.randrange(1, 9), 40), r0, min(r0 + rnd.randrange(1, 41), 192))
+        if trial % 4 == 1:              # a tall rect: runs of 64-156 rows over black, and the floor's
+            r0 = rnd.randrange(0, 100)
+            rect = (c0, min(c0 + rnd.randrange(1, 9), 40), r0, min(r0 + rnd.randrange(64, 193), 192))
         # the begin (the step's st_begin charges it)
         set_rect(r, rect)
         r.poke16(a("FR_LEFT"), 0xFFFF)
@@ -1038,7 +1047,8 @@ def test_pieces_are_tight(r):
         # the rect, drawn on random budgets (valid caches after the first full draw)
         calls = 0
         while True:
-            left = rnd.choice((rnd.randrange(14, 60), rnd.randrange(60, 400), rnd.randrange(400, 1500), 0xFFFF))
+            left = rnd.choice((rnd.randrange(14, 60), rnd.randrange(60, 400), rnd.randrange(400, 1500),
+                               rnd.randrange(1500, 4000), 0xFFFF))
             rec = trace_call(r, "fish_rect_rows", left)
             nact = r.peek(a("rd_nact"))
             for kind, units, cycles, x in pieces_of(rec):
@@ -1050,6 +1060,8 @@ def test_pieces_are_tight(r):
                     hold("setup" if x[0] < 4 else "setup many", units, cycles, setup_var(x), (specs, rect, x))
                 elif kind == "rows":
                     hold(kind, units, cycles, rows_var(x, rect[1] - rect[0]), (specs, rect, left))
+                elif left < a("FC_CALL"):   # (a call with less than its own charge left takes it all
+                    hold("call", a("FC_CALL"), cycles, CALL_VAR, (specs, rect, left))  # and stops)
                 else:
                     hold("call", units, cycles, CALL_VAR + 16 * x, (specs, rect, left))
             calls += 1
@@ -1070,7 +1082,9 @@ def test_pieces_are_tight(r):
             nact = r.peek(a("rd_nact"))
             nlist = r.peek(a("rd_nlist"))
             for kind, units, cycles, x in pieces_of(rec):
-                if kind == "call":
+                if kind == "call" and left < a("FC_BGCALL"):      # (the same: it takes what is left)
+                    hold("bgcall again", a("FC_BGCALL"), cycles, BGCALL_VAR, (specs, rect, left))
+                elif kind == "call":
                     fresh = units - x > a("FC_BGCALL")
                     nweed = sum(sp[0] == SEAWEED for sp in specs)
                     hold("bgcall" if fresh else "bgcall again", units, cycles,
@@ -1089,6 +1103,62 @@ def test_pieces_are_tight(r):
                 break
     print("\nworst slack by piece (slack, units, cycles):",
           {k: v[:3] for k, v in sorted(worst.items())})
+
+
+def test_polls_at_their_slowest(r):
+    """The IIc's vertical-blank latch makes vbl_poll dearer than the harness's
+    fallback (26): a blank pending and FRAMES wrapping, 49. st_begin's
+    ST_BEGIN and fish_bg_rows' FC_BGCALL carry it: the begin stays within its
+    charge, and a background call that draws keeps the 160 it needs for the
+    charge that could stop it (a set-up's of four or more layers)."""
+    a = r.addr
+    latch = VblLatch(r)
+    FRAMES = 0x25 + 7                   # timing.s: CORE + 7
+
+    def slow():
+        r.poke(ST_TIMING, 1)
+        latch.cleared = -10 ** 9        # a blank is pending
+        r.poke(FRAMES, 0xFF)            # and the count wraps
+        r.poke(FRAMES + 1, 0)
+    try:
+        for n in (0, 1, 3, 10):
+            clear(r)
+            place(r, stack(n, "sea", "mixed") if n else [])
+            set_rect(r, (14, 18, 62, 70))
+            slow()
+            r.poke16(a("FR_LEFT"), 0xFFFF)
+            cycles = r.call("st_begin")
+            units = 0xFFFF - r.peek16(a("FR_LEFT"))
+            assert cycles <= 16 * units, ("begin", n, cycles, units)
+        STOP = 160                      # FC_BGCALL's comment: the charge that stops the call
+        for nweed in (0, 1, 10):
+            specs = [(SEAWEED, i & 1, 0, 100 + 2 * i, 192 - 36 - 1 - i) for i in range(nweed)]
+            clear(r)
+            place(r, specs)
+            for i in range(nweed):
+                b = box(r, i)[1]
+                for c in range(b[0], b[1], 8):
+                    rebuild_bg(r, (c, min(c + 8, b[1]), b[2], b[3]))
+            set_rect(r, (14, 20, 160, 180))
+            r.call("fish_bg_begin")
+            slow()
+            call = [p for p in pieces_of(trace_call(r, "fish_bg_rows", 0xFFFF)) if p[0] == "call"][0]
+            assert 16 * call[1] - call[2] >= STOP, ("fresh", nweed, call)
+            for left in range(90, 1500, 20):                        # a call that stops in the rows,
+                r.poke(ST_TIMING, 0)
+                set_rect(r, (14, 20, 160, 180))
+                r.call("fish_bg_begin")
+                rec = trace_call(r, "fish_bg_rows", left)
+                if any(m[0] == "rr_rows_ret" for m in rec) and not r.carry() and r.peek(a("bj_pend")):
+                    slow()                                          # then one that carries its run on
+                    call = [p for p in pieces_of(trace_call(r, "fish_bg_rows", 0xFFFF)) if p[0] == "call"][0]
+                    assert call[1] == a("FC_BGCALL") and 16 * call[1] - call[2] >= STOP, ("again", nweed, call)
+                    break
+            else:
+                assert False, ("no call stopped in the rows", nweed)
+    finally:
+        r.poke(ST_TIMING, 0)
+        del r.mem.read_hooks[0xC019], r.mem.read_hooks[0xC070]
 
 
 def test_build_charges(r):
@@ -2032,8 +2102,8 @@ def test_budget(hop_dir):
 def test_in_bounds(hop_dir):
     """Writes only its own memory; never bit 7 on page 1 (page 2 holds its
     art and code, and is never shown)."""
-    s = check_in_bounds(FX, steps=3000, build=hop_dir, extra=FISH_ALLOWED)
-    assert s.aux_writes_outside(*ALLOWED_AUX) == []
+    s = check_in_bounds(FX, steps=3000, build=hop_dir, extra=FISH_ALLOWED, extra_aux=FISH_ALLOWED_AUX)
+    assert s.aux_writes_outside(*FISH_ALLOWED_AUX) == []
     assert all(b & 0x80 == 0 for b in s.page_bytes(PAGE1))
 
 
@@ -2107,25 +2177,48 @@ def test_screen_is_always_right(built):
 
 
 def split(s):
-    """One step: (cycles, cycles outside the calls it pays for)."""
-    paid = {s.addr(n) for n in ("fish_weed", "fish_hop", "renew", "st_begin",
-                                "fish_rect_rows", "fish_bg_rows")}
+    """One step: (cycles, cycles outside the calls it pays for, the dearest
+    hop's scheduling). A hop pays HOP_SCHED for the step's own work on it:
+    st_pick and st_hop apart from the calls they make (fish_hop, renew,
+    st_begin, fish_rect_rows), so those count as paid and are measured
+    st_pick + st_hop a hop."""
+    a = s.addr
+    paid = {a(n) for n in ("fish_weed", "fish_hop", "renew", "st_begin", "fish_rect_rows", "fish_bg_rows",
+                           "st_pick", "st_hop")}
+    sched_outer = {a("st_pick"), a("st_hop")}
+    sched_inner = {a(n) for n in ("fish_hop", "renew", "st_begin", "fish_rect_rows")}
     mpu = s.mpu
     ret = 0x0200 - 1
     s.mem.ram[0x1FF], s.mem.ram[0x1FE] = ret >> 8, ret & 0xFF
     mpu.sp, mpu.pc, mpu.p = 0xFD, OVL + 3, 0x34
     t0 = mpu.processorCycles
     inside, inside_cycles = None, 0
+    outer, inner, cur, parts = None, None, 0, []
     while mpu.pc != 0x0200:
-        if inside is None and mpu.pc in paid:
+        pc = mpu.pc
+        if inside is None and pc in paid:
             inside = (mpu.sp, mpu.processorCycles)
+        if outer is None and pc in sched_outer:
+            outer, cur = mpu.sp, 0
+        if outer is not None and inner is None and pc in sched_inner:
+            inner = mpu.sp
+        t = mpu.processorCycles
         mpu.step()
+        if outer is not None and inner is None:
+            cur += mpu.processorCycles - t
+        if inner is not None and mpu.sp > inner:
+            inner = None
+        if outer is not None and mpu.sp > outer:
+            outer = None
+            parts.append(cur)
         if inside and mpu.sp > inside[0]:
             inside_cycles += mpu.processorCycles - inside[1]
             inside = None
         assert mpu.processorCycles - t0 < 100_000
     total = mpu.processorCycles - t0
-    return total, total - inside_cycles
+    # a hop's scheduling is a st_pick and the st_hop after it (the last st_pick, finding nothing, stands alone)
+    sched = max([parts[i] + parts[i + 1] for i in range(0, len(parts) - 1, 2)] + [0])
+    return total, total - inside_cycles, sched
 
 
 def test_cost_estimates_are_safe(rh, hop_dir, hop_size):
@@ -2223,18 +2316,20 @@ def test_cost_estimates_are_safe(rh, hop_dir, hop_size):
             paid("hop", cycles, a("HOP_STAY"))
     print("\nleast cycles to spare (16 x units - cycles):",
           ", ".join(f"{k} {v}" for k, v in sorted(spare.items())))
-    # the step's own work, outside the calls it pays for
-    most = 0
+    # the step's own work, outside the calls it pays for; and a hop's scheduling, which it pays for
+    most, sched = 0, 0
     for count, seed in ((6, 0x4D2A), (6, 0xBEEF), (10, 0x1357), (10, 0x2468)):
         def prepare(s):
             s.poke(s.addr("fish_count"), count)
         s = start(FX, seed=seed, prepare=prepare, build=hop_dir)
         for _ in range(600):
-            most = max(most, split(s)[1])
+            _, own, sc = split(s)
+            most, sched = max(most, own), max(sched, sc)
     units = a("STEP_UNITS")
     print(f"step's own work at most {most} cycles; with STEP_UNITS {units}: "
-          f"{most + 16 * units + POLLS} of {HARD}")
+          f"{most + 16 * units + POLLS} of {HARD}; a hop's scheduling at most {sched} (HOP_SCHED {16 * a('HOP_SCHED')})")
     assert most + 16 * units + POLLS < HARD
+    assert sched <= 16 * a("HOP_SCHED")
 
 
 def clean(s, why):

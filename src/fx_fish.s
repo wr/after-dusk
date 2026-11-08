@@ -47,7 +47,7 @@ FISH_CYCLE = 30 * FISH_HOP      ; the step's load cycle in ticks: the beats
 .export fish_w, fish_load, fish_pending, fish_late_max, fish_hops, fish_late, STEP_UNITS
 .export fish_bgq_peak, fish_bgq_over, fish_bg_busy, fish_bg_busy_max, fish_bgw, fish_bgr
 .export fish_newslot, st_lastw, FISH_ST_END, st_hop, st_weed, st_begin, st_worst, st_bg, renew, arrive
-.export ST_NWEED, ST_BEGW, ST_BGMIN, ST_DONE, HOP_STAY, HOP_GONE, ARR_UNITS
+.export st_pick, ST_NWEED, ST_BEGW, ST_BGMIN, ST_DONE, HOP_SCHED, HOP_STAY, HOP_GONE, ARR_UNITS
 .export WEED_TICK, WEED_SWAY, WEED_GONE, ST_BEGIN, ST_BEGPER, ST_BEGPASS, DRAW_MIN
 
 .import aux_fetch, aux_copy, vbl_poll, row_lo, row_hi, xbyte_lo, xbyte_hi, xmod_lo, xmod_hi
@@ -696,7 +696,7 @@ FISH_ST_END = st_lastw + 1
 fish_now = FISH_ZP_END          ; 2: ticks since init
 ST_DONE  = FISH_ZP_END + 2      ; hops started this tick
 ST_NWEED = FISH_ZP_END + 3      ; Seaweed slots
-ST_BEST  = FISH_ZP_END + 4      ; pick: the latest so far, and its slot
+ST_BEST  = FISH_ZP_END + 4      ; st_pick: the latest so far, and its slot
 ST_BSL   = FISH_ZP_END + 5
 ST_BEGW  = FISH_ZP_END + 6      ; 2: a begin at its worst,
 ST_BGMIN = FISH_ZP_END + 8      ; 2: and one useful background call
@@ -712,8 +712,11 @@ ST_P     = FISH_ZP_END + 17     ;   and the p being tried
 
 ; ---- costs, units of 16 cycles (measured worst cycles in brackets) ----
 STEP_UNITS = 920                ; the tick's budget
-HOP_STAY   = 110                ; fish_hop, staying (fish_box, the move, fish_locate)
-HOP_GONE   = 245                ;   gone and replaced
+HOP_SCHED  = 54                 ; the step's own work for a hop: st_pick over the slots (about
+                                ;   45 a slot when due: 480 with ten), may_go, afford_t and
+                                ;   st_hop's own (about 360): 792 measured with ten, 840 by count
+HOP_STAY   = 110 + HOP_SCHED    ; and fish_hop, staying (fish_box, the move, fish_locate)
+HOP_GONE   = 245 + HOP_SCHED    ;   or gone and replaced
 ARR_UNITS  = 340 + 13 * (FISH_CYCLE - 60) / 6
                                 ; renew: leaving and arriving (5,072; about
                                 ;   5,200 at worst: beat 3 in and out, a Bubble's
@@ -725,8 +728,9 @@ ARR_UNITS  = 340 + 13 * (FISH_CYCLE - 60) / 6
 WEED_TICK  = 3                  ; fish_weed, a plain tick (39)
 WEED_SWAY  = 76                 ;   a sway (1,162)
 WEED_GONE  = 235                ;   gone and replaced (3,531)
-ST_BEGIN   = 9                  ; st_begin: fish_rect_begin (its poll and set-up), its
-                                ;   own sums and charge (139)
+ST_BEGIN   = 11                 ; st_begin: fish_rect_begin (its poll and set-up), its
+                                ;   own sums and charge (139 here; 160 with a IIc's latch poll
+                                ;   at its slowest: a blank pending and FRAMES wrapping)
 ST_BEGPER  = 8                  ;   per slot it lists (110-114); ST_BEGW counts every slot so
 ST_BEGPASS = 5                  ;   per slot it passes over (23-64, by which test rejects it)
 DRAW_MIN   = FC_CALL + FC_EVENT + 2 * (FC_EVPER + FC_EVACT) + FC_SETUP + FC_PATCH + 4 * FC_PATCHCOL + FC_ROWS + FC_ROWFLR + 20
@@ -794,7 +798,7 @@ fish_step:
         jsr fish_rect_rows
         bcc @rts
         stz fish_pending
-@hop:   jsr pick                ; 4. the hops due
+@hop:   jsr st_pick                ; 4. the hops due
         bmi st_bg               ; none: 5.
         ldy ST_DONE
         beq :+
@@ -885,10 +889,10 @@ is_weed:
         cmp #ROLE_STILL
         rts
 
-; pick: X = the slot whose hop has been due longest (due <= now; ties: the
+; st_pick: X = the slot whose hop has been due longest (due <= now; ties: the
 ; lowest slot), A = the ticks it is late (at most 255), or X = $FF and N
 ; set if none. Seaweed (fish_w = 0) never hops.
-pick:   lda #$FF
+st_pick:   lda #$FF
         sta ST_BSL
         stz ST_BEST
         ldx fish_n

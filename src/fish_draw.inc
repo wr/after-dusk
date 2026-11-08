@@ -161,15 +161,18 @@ FC_PASS   = 40                  ;   per pass: its glue, jumps, and three operand
                                 ;   its three slots' columns (13.5 units a column, rounded up:
                                 ;   mpu_lo/hi; a slot past the layers misses every column: 66 each)
 FC_ROWS   = 36                  ;   working out the rows' charge and calling the kernel (360 over
-                                ;   black; the multiply varies with the rows' bits, up to 160 more)
+                                ;   black; the multiply varies with the rows' bits: up to 225 more,
+                                ;   since a pass takes at most 63 rows)
 FC_ROWFLR = 5                   ;   and over the floor or in the background job: the row's FISH_BG
                                 ;   address and the floor pointer (67)
 FC_PART   = 28                  ;   and finding how many fit when they don't all: the tries cost
-                                ;   120 to 400 by how many sizes are tried (a constant-time
-                                ;   division would cost about 700, more than the worst try path)
-FC_BGCALL = 22                  ; fish_bg_rows itself, its poll and its rectangle, carrying its run
-                                ;   on (184), and the charge that stops it (a set-up's of four or
-                                ;   more layers: 160)
+                                ;   120 to 400 by how many sizes are tried, 32 down to 1 (a pass
+                                ;   takes at most 63 rows; a constant-time division would cost
+                                ;   about 700, more than the worst try path)
+FC_BGCALL = 24                  ; fish_bg_rows itself, its poll and its rectangle, carrying its run
+                                ;   on (184 here; 26 more with a IIc's latch poll at its slowest),
+                                ;   and the charge that stops it (a set-up's of four or more
+                                ;   layers: 160)
 FC_BGSETUP = 8                  ;   listing the Seaweed again: its fixed part and the charge (113)
 FC_BGPER  = 8                   ;   per Seaweed slot: counted and listed (123; not listed 73)
 FC_BGANY  = 3                   ;   per other slot: counted and passed over (32)
@@ -198,7 +201,7 @@ RC_MPBYTE  = 37                 ; a pass kernel's byte (three layers over the fl
                                 ;   FISH_BG row crosses a page (W, the later passes' background,
                                 ;   is in zero page)
 ; the step's estimate (fish_est), cycles
-EST_FIXC   = 900 + 16 * (11 + FC_CALL + FC_EVENT + FC_SETUP + FC_PATCH + (7 * FC_PATCHCOL + 1) / 2 + FC_ROWS)
+EST_FIXC   = 900 + 16 * (11 + FC_CALL + FC_EVENT + FC_EVACT + FC_SETUP + FC_PATCH + (7 * FC_PATCHCOL + 1) / 2 + FC_ROWS)
                                 ; fish_hop, a begin (11: ST_BEGIN 9 and a unit or two), a run's start
 EST_SLOTC  = 16 * (8 + FC_EVPER); per slot in use: the listing (ST_BEGPER 8) and the scan
 
@@ -1215,6 +1218,7 @@ rr_rows:
         lda #FC_ROWS            ; working out the charge, paid for first (floor rows: more
         ldx rd_floor            ; for their pointers)
         beq :+
+        clc
         adc #FC_ROWFLR
 :       jsr charge_a
         bcs :+
@@ -1222,7 +1226,10 @@ rr_rows:
 :       lda RD_NEXT
         sec
         sbc FR_ROW
-        sta KT                  ; rows left in the run
+        cmp #64                 ; at most 63 rows a pass (the multiply's bits and the tries
+        bcc :+                  ; below are bounded by it; the next pass pays FC_ROWS again)
+        lda #63
+:       sta KT                  ; rows left in the run, or 63
         lda rd_cost
         sta KT+3
         lda rd_cost+1

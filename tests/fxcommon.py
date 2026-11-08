@@ -16,9 +16,9 @@ ALLOWED = [
 # Fish! alone may also write the language card's spare area after the copy
 # loops (its drawing code lives there), and these aux areas (its tables and
 # mirrored art): never FX and FX2 ($2000-$9FFF), which every effect's next
-# run loads from.
+# run loads from. No other effect writes aux memory at all.
 FISH_ALLOWED = [(0xF700, 0xFFFA)]
-ALLOWED_AUX = [(0x0800, 0x2000), (0xA000, 0xC000)]
+FISH_ALLOWED_AUX = [(0x0800, 0x2000), (0xA000, 0xC000)]
 
 
 
@@ -77,14 +77,14 @@ def check_budget(fx, steps=300, seeds=(0x4D2A, 0x1357, 0xBEEF), build=None):
     return worst, median
 
 
-def check_in_bounds(fx, steps=300, build=None, extra=()):
+def check_in_bounds(fx, steps=300, build=None, extra=(), extra_aux=()):
     """The effect writes only ALLOWED (and `extra`, an effect's own areas), and
-    nothing to aux memory outside ALLOWED_AUX."""
+    nothing to aux memory outside `extra_aux`."""
     s = start(fx, build=build)
     s.start_tracking()
     run(s, steps)
     assert s.writes_outside(*ALLOWED, *extra) == []
-    assert s.aux_writes_outside(*ALLOWED_AUX) == []
+    assert s.aux_writes_outside(*extra_aux) == []
     return s
 
 
