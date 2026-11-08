@@ -7,15 +7,17 @@ OVL = 0x8800                    # the overlay slot: jmp init, jmp step
 
 # Writes an effect may make: drawing scratch, RNG and core scratch, DISP,
 # sprite engine, its own zero page, the extra drawing scratch, the stack,
-# the status block, FXRAM, both screen pages, display soft switches, and the
-# language card's spare area after the copy loops (Fish!'s drawing code).
+# the status block, FXRAM, both screen pages, and display soft switches.
 ALLOWED = [
     (0x10, 0x20), (0x20, 0x30), (0x30, 0x40), (0x40, 0x80), (0x80, 0x90), (0x90, 0xA0),
     (0x100, 0x200), (0x0310, 0x0320), (0x0800, 0x2000), (0x2000, 0x6000),
-    (0xC050, 0xC058), (0xF700, 0xFFFA),
+    (0xC050, 0xC058),
 ]
-# Aux memory an effect may write (Fish!'s tables and mirrored art): never
-# FX and FX2 ($2000-$9FFF), which every effect's next run loads from.
+# Fish! alone may also write the language card's spare area after the copy
+# loops (its drawing code lives there), and these aux areas (its tables and
+# mirrored art): never FX and FX2 ($2000-$9FFF), which every effect's next
+# run loads from.
+FISH_ALLOWED = [(0xF700, 0xFFFA)]
 ALLOWED_AUX = [(0x0800, 0x2000), (0xA000, 0xC000)]
 
 
@@ -75,11 +77,13 @@ def check_budget(fx, steps=300, seeds=(0x4D2A, 0x1357, 0xBEEF), build=None):
     return worst, median
 
 
-def check_in_bounds(fx, steps=300, build=None):
+def check_in_bounds(fx, steps=300, build=None, extra=()):
+    """The effect writes only ALLOWED (and `extra`, an effect's own areas), and
+    nothing to aux memory outside ALLOWED_AUX."""
     s = start(fx, build=build)
     s.start_tracking()
     run(s, steps)
-    assert s.writes_outside(*ALLOWED) == []
+    assert s.writes_outside(*ALLOWED, *extra) == []
     assert s.aux_writes_outside(*ALLOWED_AUX) == []
     return s
 

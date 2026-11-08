@@ -12,24 +12,31 @@ import pytest
 
 import fishref
 from conftest import BUILD, hop_build
-from fxcommon import ALLOWED, ALLOWED_AUX, OVERHEAD, OVL, TICK, check_budget, check_in_bounds, start
+from fxcommon import ALLOWED, ALLOWED_AUX, FISH_ALLOWED, OVERHEAD, OVL, TICK, check_budget, check_in_bounds, start
 from sim import PAGE1, PAGE2, RNG, ST_FX, ST_TIMING, TICKS, Sim, row_base
 
 FX = 14
 FLOOR_TOP = 156
 FLOOR_BYTES = (192 - FLOOR_TOP) * 40
+P_D, WID = 0x90, 0x1F           # fish_draw.inc: a patch's first column less the layer's, the rect's width
 
 
 def art():
     return json.loads((BUILD / "fish_art.json").read_text())
 
 
-def junk(s):
+def junk(s, everywhere=False):
     """Leftovers from other effects in FXRAM and on both pages, so init has to
-    write everything it relies on."""
+    write everything it relies on; everywhere: the language card's spare area
+    and Fish!'s aux areas too (nothing else writes them, but a second run must
+    not rely on what the first left)."""
     rnd = random.Random(14)
     for lo, hi in ((0x0800, 0x2000), (0x2000, 0x6000)):
         s.mem.ram[lo:hi] = bytes(rnd.randrange(128) for _ in range(hi - lo))
+    if everywhere:
+        s.mem.ram[0xF700:0xFFFA] = bytes(rnd.randrange(256) for _ in range(0xFFFA - 0xF700))
+        for lo, hi in ((0x0800, 0x2000), (0xA000, 0xC000)):
+            s.mem.aux[lo:hi] = bytes(rnd.randrange(256) for _ in range(hi - lo))
 
 
 def visible(s, page):
@@ -134,7 +141,7 @@ def test_init_writes_only_its_own_memory(built):
         junk(s)
         s.start_tracking()
     s = start(FX, prepare=track)
-    assert s.writes_outside(*ALLOWED) == []
+    assert s.writes_outside(*ALLOWED, *FISH_ALLOWED) == []
     assert s.aux_writes_outside(*ALLOWED_AUX) == []
     assert not s.mem.rd_aux and not s.mem.wr_aux
 
@@ -706,6 +713,8 @@ def test_resumes_anywhere(r):
             cycles, units, done = charged(r, "fish_bg_rows", left)
             if left >= r.addr("FC_BGCALL"):
                 assert cycles <= 16 * units, (specs, rect, left, cycles, units)
+            else:
+                assert cycles <= 16 * r.addr("FC_BGCALL")
             if done:
                 break
         assert fishref.fish_bg(r) == whole, (trial, specs, rect)
@@ -777,7 +786,9 @@ def test_charges_cover_real_cycles(r):
 
 def test_cache_costs(r):
     """A cache build (lit and mask) for every kind, both facings, every shift
-    costs at most what fish_rect_rows charges for it."""
+    costs at most what fish_rect_rows charges for it (the slot's two build
+    charges, as fish_locate worked them out), and the cache is the frame
+    shifted into place."""
     worst = {}
     for kind in range(14):
         k = kind_of(kind)
@@ -788,7 +799,8 @@ def test_cache_costs(r):
                 assert box(r, 0)[0]
                 cycles = r.call("fish_cache", x=0)
                 assert r.peek(r.addr("sl_lit")) and r.peek(r.addr("sl_msk"))
-                charge = 2 * (r.addr("RC_BUILDFIX") + k["rows"] * r.addr("RC_BUILD"))
+                charge = 16 * sum(r.peek(r.addr(lo)) | r.peek(r.addr(hi)) << 8
+                                  for lo, hi in (("sl_bcl", "sl_bch"), ("sl_bml", "sl_bmh")))
                 assert cycles <= charge, (kind, d, x, cycles, charge)
                 worst[kind] = max(worst.get(kind, 0), cycles)
                 # and the cache is the frame shifted into place
@@ -805,6 +817,301 @@ def test_cache_costs(r):
                         want_msk[c0 - cc + j] |= m
                     assert got_lit == want_lit and got_msk == want_msk, (kind, d, x, i)
     print("\nworst cache build (lit + mask), cycles:", worst)
+
+
+def trace_call(s, routine, left):
+    """One budgeted call with FR_LEFT = left, traced: marks (name, cycles so
+    far, FR_LEFT then, X) at every piece boundary the engine passes, and the
+    call's cycles."""
+    a = s.addr
+    marks = {a(n): n for n in ("run_start", "rs_setup", "rr_rows", "build_lit", "build_msk", "no_budget",
+                               "patch_layer")}
+    mpu = s.mpu
+    s.poke16(a("FR_LEFT"), left)
+    ret = 0x0200 - 1
+    s.mem.ram[0x1FF], s.mem.ram[0x1FE] = ret >> 8, ret & 0xFF
+    mpu.sp, mpu.pc, mpu.p = 0xFD, a(routine), 0x34
+    t0 = mpu.processorCycles
+    rec = [("start", 0, left, 0, s.peek(a("FR_ROW")))]
+    opened = []
+    while mpu.pc != 0x0200:
+        pc = mpu.pc
+        if pc in marks:
+            name = marks[pc]
+            x = mpu.x                       # (a set-up's X is its layers; a patch's its columns and misses)
+            if name == "rs_setup":
+                x = s.peek(a("rd_nact"))
+            elif name == "patch_layer":
+                d, w = s.peek(P_D), s.peek(WID)
+                x = (w, sum((d + c) & 0xFF >= 6 for c in range(w)))
+            rec.append((name, mpu.processorCycles - t0, s.peek16(a("FR_LEFT")), x, s.peek(a("FR_ROW"))))
+            if name in ("rr_rows", "build_lit", "build_msk"):
+                opened.append((name, mpu.sp))
+        mpu.step()
+        while opened and mpu.sp > opened[-1][1]:
+            name, _ = opened.pop()
+            rec.append((name + "_ret", mpu.processorCycles - t0, s.peek16(a("FR_LEFT")), mpu.x, s.peek(a("FR_ROW"))))
+        assert mpu.processorCycles - t0 < 600_000
+    rec.append(("end", mpu.processorCycles - t0, s.peek16(a("FR_LEFT")), 0, s.peek(a("FR_ROW"))))
+    return rec
+
+
+def pieces_of(rec):
+    """The charged pieces of a traced call: (kind, units charged, cycles,
+    detail: an event's whether a build it couldn't pay for cut its checks
+    short, a build's slot, a set-up's (layers, width, columns patched, of
+    them misses), or a row chunk's (first row, rows)), with 'call' what no
+    other piece covers: its detail is the units a run's first charge paid
+    when its second couldn't be (the stop wastes them)."""
+    out = []
+    total_c, total_u = rec[-1][1], rec[0][2] - rec[-1][2]
+    wasted = 0
+    i = 1
+    while i < len(rec):
+        name, c, u, x, row = rec[i]
+        if name == "run_start":
+            if rec[i - 1][0].endswith("_ret"):  # (the loop's turn from the last piece is the run's)
+                c = rec[i - 1][1]
+            j = i + 1
+            builds = []
+            while rec[j][0] not in ("rs_setup", "no_budget", "end"):
+                if rec[j][0] in ("build_lit", "build_msk"):
+                    k = j + 1
+                    while rec[k][0] != rec[j][0] + "_ret":
+                        k += 1
+                    builds.append((rec[j][0], rec[j][2] - rec[k][2], rec[k][1] - rec[j][1], rec[j][3]))
+                    j = k
+                j += 1
+            failed = [b for b in builds if b[1] == 0]   # a build's charge that failed is the call's stop
+            if rec[j][0] == "rs_setup" or failed:       # (a charged event; detail: cut short by a
+                out.append(("event", u - rec[j][2] - sum(b[1] for b in builds),      # build it couldn't pay for)
+                            rec[j][1] - c - sum(b[2] for b in builds), bool(failed)))
+            else:
+                wasted += u - rec[j][2]                 # (its second charge failed: the first is lost)
+            out += [("build", bu, bc, bx) for _, bu, bc, bx in builds if bu]
+            i = j
+            continue
+        if name == "rs_setup":
+            j = i + 1
+            patches = []
+            while rec[j][0] not in ("rr_rows", "end"):
+                if rec[j][0] == "patch_layer":
+                    patches.append(rec[j][3])
+                j += 1
+            if rec[j][0] == "rr_rows":      # (a set-up whose charge failed is the call's stop)
+                w = patches[0][0] if patches else 0
+                out.append(("setup", u - rec[j][2], rec[j][1] - c,
+                            (x, w, w * len(patches), sum(m for _, m in patches))))
+            i = j
+            continue
+        if name == "rr_rows":
+            j = i + 1
+            while rec[j][0] != "rr_rows_ret":
+                j += 1
+            if u - rec[j][2]:                # (one whose own charge failed is the call's stop)
+                out.append(("rows", u - rec[j][2], rec[j][1] - c, (row, rec[j][4] - row)))
+            i = j
+            continue
+        i += 1
+    out.append(("call", total_u - sum(p[1] for p in out), total_c - sum(p[2] for p in out), wasted))
+    return out
+
+
+WHOLE_OPEN = ("Ruling 8's whole-call bound: a call pays every piece's worst path (the call's stop, "
+              "the event's first run and scan, the rows' multiply and tries, a many-layer set-up's "
+              "passes: named in FC_CALL, FC_EVENT, FC_ROWS, FC_MANY), which a call that draws on "
+              "valid caches doesn't spend: about 700 cycles over the bound on an 18-piece call; "
+              "see task-7-report.md")
+
+
+@pytest.mark.xfail(strict=True, reason=WHOLE_OPEN)
+def test_whole_call_is_tight(r):
+    """Ruling 8: a whole call on valid caches is charged within 3% of its
+    cycles plus 2 units a piece charged. Printed; held strictly so it turns
+    green when the slack comes under."""
+    rnd = random.Random(98)
+    rows = []
+    for trial in range(40):
+        specs = random_scene(rnd) if trial % 2 else stack(rnd.randrange(1, 4), rnd.choice(("sea", "floor")), "mixed")
+        clear(r)
+        place(r, specs)
+        redraw_all(r)
+        i = rnd.choice([i for i, sp in enumerate(specs) if role(sp[0]) != ROLE_STILL] or [0])
+        vis, b = box(r, i)
+        if not vis:
+            continue
+        rect = (b[0], min(b[0] + 8, b[1]), b[2], b[3])
+        set_rect(r, rect)
+        r.call("fish_rect_begin")
+        rec = trace_call(r, "fish_rect_rows", 0xFFFF)
+        ps = pieces_of(rec)
+        units, cycles = rec[0][2] - rec[-1][2], rec[-1][1]
+        rows.append((16 * units - cycles - (cycles * 0.03 + 32 * len(ps)), 16 * units - cycles, cycles, len(ps)))
+    rows.sort(reverse=True)
+    print("\nwhole calls: (over the bound, slack, cycles, pieces)", rows[:5], "...", rows[-1])
+    assert all(over <= 0 for over, *_ in rows), rows[0]
+
+
+def test_pieces_are_tight(r):
+    """Ruling 8: every piece the engine charges is held to its own charge: it
+    never costs more (coverage), and its charge is within 32 cycles plus the
+    piece's named variance of what it costs (tightness): the call, a run's
+    event and scan, each build, the kernel's set-up and patching, each row
+    chunk, the background call and its listing, and the step's begin. (The
+    whole-call bound is test_whole_call_is_tight.)"""
+    rnd = random.Random(99)
+    a = r.addr
+    worst = {}
+    PER_ROW_BUILD = 0                   # (a build's page crossings are in its charge)
+    def event_var(nlist, nact, cut):
+        """FC_EVENT's fixed part costs 184-201, and 22 more after the first run
+        of a call (charged 240): 24 of variance beyond a unit's rounding; a
+        listed slot's scan 26-34 (charged 48): 22 each; an active layer 90-103
+        with its scan's (charged 112): 22 each. A build that can't be paid for
+        stops the checks (41 a layer) short."""
+        return 24 + 22 * nlist + (41 * nact if cut else 0)
+    ROWS_VAR = 16 + 160 + 280           # a unit's rounding; the multiply by the rows' bits; the tries
+
+    def setup_var(detail):
+        """FC_SETUP's set-up costs 397 over the sea, 406 over the floor, 418-423
+        in the background job (which pays a unit more): 19 of slack at most; a
+        layer 189-197 (charged 208): 19 each; a column 71, 66 outside the
+        layer's six (charged 72): 1 and 6; an odd width rounds up half a column
+        a layer: 8. Four or more layers: FC_MANY's 319-363 (charged 384: 65),
+        FC_PASS 629 charged 640 and its columns rounded up to a unit (19 a
+        pass), FC_MLAYER 61 charged 64 (3 a layer), and the columns as above (a
+        spare slot's all miss)."""
+        nact, w, cols, misses = detail
+        if nact < 4:
+            return 19 * (nact + 1) + 8 * (w & 1) * nact + (cols - misses) + 6 * misses
+        passes = cols // w // 3
+        return 33 + 19 * passes + 3 * nact + (cols - misses) + 6 * misses
+
+    def rows_var(detail, w, bg=False):
+        """ROWS_VAR, and the rows' own placement allowances: over the floor a
+        FISH_BG row that crosses a page (1 a byte) and the pointer's step into a
+        new page (4), each about one row in six; in the background job the
+        floor's row from aux may cross a page too (1 a byte), and its pointer
+        step (4); over black the row tables' pages (2 a row below row 115)."""
+        row0, rows = detail
+        return ROWS_VAR + rows * ((2 * w + 8) if bg else (w + 4) if row0 >= FLOOR_TOP else 2)
+    CALL_VAR = 8 + 164                  # a call that draws costs 92-167; one that stops at a set-up of
+                                        # four or more layers 244 (FC_CALL pays the dearest stop); and
+                                        # a stop at a run's second charge wastes its first (16 x detail)
+    BGCALL_VAR = 8 + 160                # a background call that draws costs 184 carrying its run on, 297
+                                        # listing afresh; one that stops at a set-up of four or more
+                                        # layers 160 more (FC_BGCALL pays it); listing afresh: 15 of
+                                        # rounding, a Seaweed listed 123 (charged 128), one elsewhere
+                                        # 73, another slot 32 (charged 48)
+
+    def hold(kind, units, cycles, allow, detail):
+        slack = 16 * units - cycles
+        assert slack >= 0, ("under", kind, units, cycles, detail)
+        assert slack <= 32 + allow, ("loose", kind, units, cycles, allow, detail)
+        if kind not in worst or slack > worst[kind][0]:
+            worst[kind] = (slack, units, cycles, detail)
+
+    for trial in range(120):
+        specs = random_scene(rnd)
+        if trial % 3 == 0:
+            n = rnd.randrange(1, 11)
+            specs = stack(n, rnd.choice(("sea", "floor")), rnd.choice(("right", "mixed")))
+        clear(r)
+        place(r, specs)
+        for i, sp in enumerate(specs):
+            vis, b = box(r, i)
+            if vis and sp[0] == SEAWEED:
+                for c in range(b[0], b[1], 8):
+                    rebuild_bg(r, (c, min(c + 8, b[1]), b[2], b[3]))
+        c0 = rnd.randrange(40)
+        if trial % 3 == 0:
+            c0 = 13 + rnd.randrange(3)
+        r0 = rnd.randrange(192)
+        rect = (c0, min(c0 + rnd.randrange(1, 9), 40), r0, min(r0 + rnd.randrange(1, 41), 192))
+        # the begin (the step's st_begin charges it)
+        set_rect(r, rect)
+        r.poke16(a("FR_LEFT"), 0xFFFF)
+        cycles = r.call("st_begin")
+        units = 0xFFFF - r.peek16(a("FR_LEFT"))
+        nlist = r.peek(a("rd_nlist"))
+        hold("begin", units, cycles, 5 + 18 * nlist + 57 * (len(specs) - nlist), (specs, rect))
+        # the rect, drawn on random budgets (valid caches after the first full draw)
+        calls = 0
+        while True:
+            left = rnd.choice((rnd.randrange(14, 60), rnd.randrange(60, 400), rnd.randrange(400, 1500), 0xFFFF))
+            rec = trace_call(r, "fish_rect_rows", left)
+            nact = r.peek(a("rd_nact"))
+            for kind, units, cycles, x in pieces_of(rec):
+                if kind == "event":
+                    hold(kind, units, cycles, event_var(nlist, nact, x), (specs, rect, left))
+                elif kind == "build":
+                    hold(kind, units, cycles, PER_ROW_BUILD * kind_of(specs[x][0])["rows"], (specs, x))
+                elif kind == "setup":
+                    hold("setup" if x[0] < 4 else "setup many", units, cycles, setup_var(x), (specs, rect, x))
+                elif kind == "rows":
+                    hold(kind, units, cycles, rows_var(x, rect[1] - rect[0]), (specs, rect, left))
+                else:
+                    hold("call", units, cycles, CALL_VAR + 16 * x, (specs, rect, left))
+            calls += 1
+            assert calls < 500
+            if r.carry():
+                break
+        # the background job: its call and listing, fresh and carried on
+        weeds = [i for i, sp in enumerate(specs) if sp[0] == SEAWEED]
+        if not weeds:
+            continue
+        b = box(r, rnd.choice(weeds))[1]
+        rect = (b[0], min(b[0] + 8, b[1]), rnd.choice((140, 156, 170)), rnd.choice((180, 192)))
+        set_rect(r, rect)
+        r.call("fish_bg_begin")
+        while True:
+            left = rnd.choice((rnd.randrange(14, 80), rnd.randrange(80, 500), 0xFFFF))
+            rec = trace_call(r, "fish_bg_rows", left)
+            nact = r.peek(a("rd_nact"))
+            nlist = r.peek(a("rd_nlist"))
+            for kind, units, cycles, x in pieces_of(rec):
+                if kind == "call":
+                    fresh = units - x > a("FC_BGCALL")
+                    nweed = sum(sp[0] == SEAWEED for sp in specs)
+                    hold("bgcall" if fresh else "bgcall again", units, cycles,
+                         BGCALL_VAR + 16 * x
+                         + (15 + 5 * nlist + 55 * (nweed - nlist) + 16 * (len(specs) - nweed) if fresh else 0),
+                         (specs, rect, left))
+                elif kind == "event":
+                    hold(kind, units, cycles, event_var(nlist, nact, x), (specs, rect, left))
+                elif kind == "build":
+                    hold(kind, units, cycles, PER_ROW_BUILD * kind_of(specs[x][0])["rows"], (specs, x))
+                elif kind == "setup":
+                    hold("setup" if x[0] < 4 else "setup many", units, cycles, setup_var(x), (specs, rect, x))
+                else:
+                    hold("rows", units, cycles, rows_var(x, rect[1] - rect[0], bg=True), (specs, rect, left))
+            if r.carry():
+                break
+    print("\nworst slack by piece (slack, units, cycles):",
+          {k: v[:3] for k, v in sorted(worst.items())})
+
+
+def test_build_charges(r):
+    """build_lit and build_msk, each on its own through the charged path, for
+    every kind, both frames, both facings: cycles within the units charged
+    (RC_BUILDFIX + rows x RC_BUILD and the source reads that cross a page,
+    as fish_locate counts them)."""
+    worst = {"lit": (-9999, None), "msk": (-9999, None)}
+    for kind in range(14):
+        k = kind_of(kind)
+        for d in ((0, 1) if k["role"] < ROLE_STILL else (0,)):
+            for f in (0, 1):
+                clear(r)
+                place(r, [(kind, f, d, 100, 60 if k["role"] != ROLE_STILL else 156)])
+                for part, routine, flag in (("lit", "build_lit", "sl_lit"), ("msk", "build_msk", "sl_msk")):
+                    r.poke16(r.addr("FR_LEFT"), 0xFFFF)
+                    cycles = r.call(routine, x=0)
+                    units = 0xFFFF - r.peek16(r.addr("FR_LEFT"))
+                    assert r.carry() and r.peek(r.addr(flag)), (kind, f, d, part)
+                    assert cycles <= 16 * units, (kind, f, d, part, cycles, units)
+                    over = cycles - (r.addr("RC_BUILDFIX") + k["rows"] * r.addr("RC_BUILD")) + 16
+                    worst[part] = max(worst[part], (over, (kind, f, d, cycles, units)))
+    print("\nbuilds nearest their charge (cycles over RC_BUILDFIX + rows x RC_BUILD, less a unit):", worst)
 
 
 def test_many_layers(r):
@@ -1725,7 +2032,7 @@ def test_budget(hop_dir):
 def test_in_bounds(hop_dir):
     """Writes only its own memory; never bit 7 on page 1 (page 2 holds its
     art and code, and is never shown)."""
-    s = check_in_bounds(FX, steps=3000, build=hop_dir)
+    s = check_in_bounds(FX, steps=3000, build=hop_dir, extra=FISH_ALLOWED)
     assert s.aux_writes_outside(*ALLOWED_AUX) == []
     assert all(b & 0x80 == 0 for b in s.page_bytes(PAGE1))
 
@@ -1958,11 +2265,11 @@ def busy_fish(s):
 
 def test_second_run_starts_clean(hop_dir, hop_size):
     """Review Focus 2: Fish! runs 500 steps and stops mid-work; Zot! and the
-    toasters run (they write over page 2 and FXRAM, and Zot! the language
-    card's spare area is left alone); Fish! starts again clean. And again
-    after Ctrl-Reset (restart) while Fish! was mid-work. (The 4-dot build no
-    longer parks creatures at the edges: a begin is cheaper, so a leaving hop
-    fits its tick.)"""
+    toasters run (they write over page 2 and FXRAM), and the language card's
+    spare area and Fish!'s aux areas are filled with junk; Fish! starts again
+    clean. And again after Ctrl-Reset (restart) while Fish! was mid-work.
+    (The 4-dot build no longer parks creatures at the edges: a begin is
+    cheaper, so a leaving hop fits its tick.)"""
     s = start(FX, seed=0x5EED, build=hop_dir)
     for _ in range(500):
         s.step()
@@ -1974,6 +2281,7 @@ def test_second_run_starts_clean(hop_dir, hop_size):
         s.call(OVL, max_cycles=3_000_000)
         for _ in range(60):
             s.call(OVL + 3, max_cycles=1_000_000)
+    junk(s, everywhere=True)
     s.call("load_fx", a=FX)
     s.call("wipe_to_black", max_cycles=2_000_000)
     s.call(OVL, max_cycles=3_000_000)
@@ -1981,6 +2289,7 @@ def test_second_run_starts_clean(hop_dir, hop_size):
     for _ in range(300):
         s.step()
     busy_fish(s)
+    junk(s, everywhere=True)
     # Ctrl-Reset: restart keeps RNG and ST_FX, sets the machine up again and
     # begins an effect other than ST_FX's: Fish!, with an RNG that picks it
     s.poke(ST_FX, 3)

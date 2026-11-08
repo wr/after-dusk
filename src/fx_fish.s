@@ -31,11 +31,11 @@ FISH_CYCLE = 30 * FISH_HOP      ; the step's load cycle in ticks: the beats
 .export FISH_TRANSP, FISH_ZERO, FISH_PASS, FISH_MIRA, FISH_MIRB, FISH_STRIDE
 .export FISH_HOP, FISH_CYCLE
 .export fish_n, fish_kind, fish_frame, fish_dir, fish_xl, fish_xh, fish_yl, fish_yh
-.export FISH_MAX, fish_box, fish_locate, fish_cache, fish_est
+.export FISH_MAX, fish_box, fish_locate, fish_cache, fish_est, build_lit, build_msk, rs_setup, rd_nlist, rd_nact
 .export fish_rect_begin, fish_rect_rows, fish_bg_begin, fish_bg_rows, fish_bg_floor
 .export FR_C0, FR_C1, FR_R0, FR_R1, FR_ROW, FR_LEFT, FR_ZP_END, FISH_RD_END
-.export sl_vis, sl_lit, sl_msk, rd_pend, bj_pend
-.export FC_CALL, FC_EVENT, FC_EVPER, FC_SETUP, FC_PATCH, FC_PATCHCOL, FC_PASS, FC_ROWS, FC_PART, FC_BGCALL, FC_BGSETUP, FC_BGPER
+.export sl_vis, sl_lit, sl_msk, sl_bcl, sl_bch, sl_bml, sl_bmh, rd_pend, bj_pend
+.export FC_CALL, FC_EVENT, FC_EVPER, FC_EVACT, FC_SETUP, FC_PATCH, FC_PATCHCOL, FC_MANY, FC_MLAYER, FC_PASS, FC_ROWS, FC_ROWFLR, FC_PART, FC_BGCALL, FC_BGSETUP, FC_BGPER, FC_BGANY
 .export RC_BUILD, RC_BUILDFIX, RC_BGROW, RC_BGBYTE, RC_MPFIX, RC_MPPASS, RC_MPBYTE
 .export k_loop, k_byte, EST_FIXC, EST_SLOTC
 .export fish_count, fish_spawn, fish_hop, fish_weed, fish_rnd
@@ -48,7 +48,7 @@ FISH_CYCLE = 30 * FISH_HOP      ; the step's load cycle in ticks: the beats
 .export fish_bgq_peak, fish_bgq_over, fish_bg_busy, fish_bg_busy_max, fish_bgw, fish_bgr
 .export fish_newslot, st_lastw, FISH_ST_END, st_hop, st_weed, st_begin, st_worst, st_bg, renew, arrive
 .export ST_NWEED, ST_BEGW, ST_BGMIN, ST_DONE, HOP_STAY, HOP_GONE, ARR_UNITS
-.export WEED_TICK, WEED_SWAY, WEED_GONE, ST_BEGIN, ST_BEGPER, DRAW_MIN
+.export WEED_TICK, WEED_SWAY, WEED_GONE, ST_BEGIN, ST_BEGPER, ST_BEGPASS, DRAW_MIN
 
 .import aux_fetch, aux_copy, vbl_poll, row_lo, row_hi, xbyte_lo, xbyte_hi, xmod_lo, xmod_hi
 .import rng_next, rng_below
@@ -148,6 +148,7 @@ bg_to_screen:
 
 ; ================================================================ drawing
 .include "fish_draw.inc"
+.include "fish_init.inc"
 
 ; ---- motion state, after the renderer's RAM (FISH_RD_END) ----
 fish_beat  = FISH_RD_END        ; 10 each: ticks between hops (Bubbles 3)
@@ -162,7 +163,7 @@ fish_bgq_c1 = fish_bgq_c0 + FISH_BGQ_MAX
 fish_bgq_r0 = fish_bgq_c1 + FISH_BGQ_MAX
 fish_bgq_r1 = fish_bgq_r0 + FISH_BGQ_MAX
 FISH_MV_END = fish_bgq_r1 + FISH_BGQ_MAX        ; the first byte free for Task 5
-.assert FISH_MV_END <= FISH_STATE + $400, error, "motion state runs past FISH_STATE"
+.assert FISH_MV_END <= bq_tab, error, "motion state runs into the build-charge table"
 
 ; ---- zero page: motion, after the renderer's ----
 MV_MODE = FR_ZP_END             ; fish_spawn: 1 anywhere, 0 a newcomer
@@ -689,7 +690,7 @@ fish_bgr    = ST_CLEAR_END      ; 4: its rect (FR_C0..FR_R1; R0: the redraw's ne
 fish_newslot = fish_bgr + 4     ; the slot fish_spawn last filled
 st_lastw    = fish_newslot + 1  ; ST_NWEED when ST_BEGW was last worked out
 FISH_ST_END = st_lastw + 1
-.assert FISH_ST_END <= FISH_STATE + $400, error, "the step's state runs past FISH_STATE"
+.assert FISH_ST_END <= bq_tab, error, "the step's state runs into the build-charge table"
 
 ; ---- zero page, after the motion's ----
 fish_now = FISH_ZP_END          ; 2: ticks since init
@@ -724,18 +725,28 @@ ARR_UNITS  = 340 + 13 * (FISH_CYCLE - 60) / 6
 WEED_TICK  = 3                  ; fish_weed, a plain tick (39)
 WEED_SWAY  = 76                 ;   a sway (1,162)
 WEED_GONE  = 235                ;   gone and replaced (3,531)
-ST_BEGIN   = 11                 ; st_begin: fish_rect_begin (its poll and set-up), its
-                                ;   own charge, and a IIc's slower vbl_poll (about 130)
-ST_BEGPER  = 8                  ;   per slot in use (listed: about 125; passed over: 30-45)
-DRAW_MIN   = FC_CALL + FC_EVENT + 2 * FC_EVPER + FC_SETUP + FC_PATCH + 4 * FC_PATCHCOL + FC_ROWS + 20
+ST_BEGIN   = 9                  ; st_begin: fish_rect_begin (its poll and set-up), its
+                                ;   own sums and charge (139)
+ST_BEGPER  = 8                  ;   per slot it lists (110-114); ST_BEGW counts every slot so
+ST_BEGPASS = 5                  ;   per slot it passes over (23-64, by which test rejects it)
+DRAW_MIN   = FC_CALL + FC_EVENT + 2 * (FC_EVPER + FC_EVACT) + FC_SETUP + FC_PATCH + 4 * FC_PATCHCOL + FC_ROWS + FC_ROWFLR + 20
                                 ; a first row at its dearest (a redraw waits for it)
-BG_FIX     = FC_BGCALL + FC_BGSETUP + FC_EVENT + FC_SETUP + FC_ROWS + 25
+BG_FIX     = FC_BGCALL + FC_BGSETUP + FC_EVENT + FC_SETUP + FC_ROWS + FC_ROWFLR + 25
                                 ; a useful background call: a row's floor bytes
-BG_WEED    = FC_BGPER + FC_EVPER + FC_PATCH + 4 * FC_PATCHCOL + 12
+BG_WEED    = FC_BGPER + FC_EVPER + FC_EVACT + FC_PATCH + 4 * FC_PATCHCOL + 12
                                 ;   and per Seaweed its layer in the row
 LEFT_MIN   = 120                ; with less left, nothing more can start (a background
                                 ;   call with less than BG_FIX pays its call and does nothing)
 .assert LEFT_MIN <= HOP_STAY + ST_BEGIN + ST_BEGPER, error, "LEFT_MIN: a hop needs less"
+; A run's start is paid in one piece (its scan, then the kernel's set-up and
+; every layer's patching), so the dearest (10 layers: 4 passes) must fit a
+; tick's budget with the call that brings it, for a creature rect and for the
+; background job carrying its run on; and so must the dearest row chunk.
+PCOL3_8 = (27 * 8 + 1) / 2                      ; three slots' columns, 8 wide (mpu_lo/hi's last entry has 4 x (FC_PASS + this))
+RUN_WORST = FC_EVENT + 10 * (FC_EVPER + FC_EVACT) + FC_MANY + 1 + 10 * FC_MLAYER + 4 * (FC_PASS + PCOL3_8)
+.assert FC_CALL + RUN_WORST <= STEP_UNITS, error, "a run of 10 layers can't start in a tick"
+.assert FC_BGCALL + RUN_WORST <= STEP_UNITS, error, "a background run of 10 Seaweed can't start in a tick"
+.assert FC_ROWS + FC_ROWFLR + FC_PART + (67 + RC_MPFIX + 4 * (RC_MPPASS + 8 * RC_MPBYTE) + 8 + 15) / 16 <= STEP_UNITS, error, "a row of 10 layers can't be drawn in a tick"
 
 fish_step:
         inc fish_now            ; 1. the clock
@@ -1179,7 +1190,7 @@ st_worst:
 @rts:   rts
 w_base:  .byte ST_BEGIN, 0, BG_FIX
 w_weed:  .byte ST_BEGPER, 0, BG_WEED
-w_other: .byte ST_BEGPER, 0, FC_BGPER
+w_other: .byte ST_BEGPER, 0, FC_BGANY
 
 ; madd: RD_T (2 bytes) += A * X. Keeps Y.
 madd:   cpx #0
@@ -1192,12 +1203,23 @@ madd:   cpx #0
 @rts:   rts
 
 ; st_begin: fish_rect_begin over FR_C0..FR_R1, paid for after (FR_LEFT
-; holds ST_BEGW): ST_BEGW.
+; holds ST_BEGW, its worst): ST_BEGIN, ST_BEGPER per slot it listed and
+; ST_BEGPASS per slot it passed over.
 st_begin:
         jsr fish_rect_begin
-        lda ST_BEGW
-        ldy ST_BEGW+1
-        jmp charge_ay
+        lda fish_n              ; ST_BEGIN + ST_BEGPASS (5) per slot + 3 more per slot listed
+        asl a
+        asl a
+        adc fish_n
+        adc #ST_BEGIN
+        sta RD_T
+        lda rd_nlist
+        asl a
+        adc rd_nlist
+        adc RD_T
+        jmp charge_a
+.assert ST_BEGPER - ST_BEGPASS = 3, error, "st_begin adds 3 a listed slot"
+.assert FC_BGPER - FC_BGANY = 5, error, "fish_bg_rows adds 5 a Seaweed slot"
 
 ; cost_of: X = slot. Its hop's estimate in units (fish_cost, fish_costh):
 ; fish_est's. fish_w = the estimate / 64, rounded. Keeps X.
