@@ -10,7 +10,7 @@ After Dusk turns an Apple II into an ambient display that matches a vintage Mac 
 | ![Zot!](docs/screenshots/zot.gif)<br>**Zot!** | ![Can of Worms](docs/screenshots/can-of-worms.gif)<br>**Can of Worms** | ![Lissajous](docs/screenshots/lissajous.gif)<br>**Lissajous** |
 | ![Nightlines](docs/screenshots/nightlines.gif)<br>**Nightlines** | ![String Theory](docs/screenshots/string-theory.gif)<br>**String Theory** | ![Rose](docs/screenshots/rose.gif)<br>**Rose** |
 | ![Doodles](docs/screenshots/doodles.gif)<br>**Doodles** | ![Shapes](docs/screenshots/shapes.gif)<br>**Shapes** | ![Spheres](docs/screenshots/spheres.gif)<br>**Spheres** |
-| ![Bouncing Ball](docs/screenshots/bouncing-ball.gif)<br>**Bouncing Ball** | ![Rainstorm](docs/screenshots/rainstorm.gif)<br>**Rainstorm** | |
+| ![Bouncing Ball](docs/screenshots/bouncing-ball.gif)<br>**Bouncing Ball** | ![Rainstorm](docs/screenshots/rainstorm.gif)<br>**Rainstorm** | ![Fish!](docs/screenshots/fish.gif)<br>**Fish!** |
 
 ## Wait, why would an Apple II need a screen saver?
 
@@ -53,7 +53,9 @@ tools/bootstrap.sh                 # once, into .tools/
 tools/make-gifs.sh                 # the GIFs above
 ```
 
-`AGENTS.md` documents the memory layout and the rules for effects.
+`AGENTS.md` documents the memory layout and the rules for effects. `FISH_HOP=2 ./build.sh` builds
+Fish! with the original's 2-dot hops instead of 4-dot ones at half the rate (the same speed in
+coarser steps, which lets the Apple II keep more fish moving).
 
 ## A homage to After Dark
 

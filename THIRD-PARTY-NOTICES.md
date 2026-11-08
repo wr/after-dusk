@@ -18,7 +18,7 @@ holds the copyright, its license status, and how it's used.
   of ownership and no affiliation with Apple, and will be removed on a rights holder's request.
 - In repo: yes.
 - In release: yes. `build.sh` copies this master, replaces its `HELLO` program, and adds
-  `AFTERDUSK`, `FX` and `SEED` to produce `AFTERDUSK.dsk`. The DOS 3.3 boot code and file system
+  `AFTERDUSK`, `FX`, `FX2` and `SEED` to produce `AFTERDUSK.dsk`. The DOS 3.3 boot code and file system
   in `AFTERDUSK.dsk` are Apple's.
 
 ## dos33fsprogs (build tool only)
@@ -40,8 +40,8 @@ holds the copyright, its license status, and how it's used.
 
 ## Effects modelled on After Dark
 
-After Dark and its modules (Flying Toasters, Rose and the rest) are Berkeley Systems' work and
-trademarks. After Dusk is an unaffiliated tribute: every effect here is new code written from
-watching the originals run, and no Berkeley Systems code, artwork or sound is included. The
-toaster is an original drawing. Rose follows the original module's method as described (not
+After Dark and its modules (Flying Toasters, Rose, Fish! and the rest) are Berkeley Systems'
+work and trademarks. After Dusk is an unaffiliated tribute: every effect here is new code written
+from watching the originals run, and no Berkeley Systems code, artwork or sound is included. The
+toaster, the fish, the other sea creatures and the sea floor are original drawings. Rose follows the original module's method as described (not
 copied) by the after-dark project, https://github.com/Vortitron/after-dark.

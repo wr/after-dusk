@@ -31,6 +31,7 @@ EFFECTS = {
     11: ("spheres", 4, 0, 6),
     12: ("bouncing-ball", 3, 0, 5),
     13: ("rainstorm", 3, 0, 5),
+    14: ("fish", 1, 0, 6),
 }
 GREEN = (25, 215, 0)
 

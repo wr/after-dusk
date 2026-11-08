@@ -16,15 +16,20 @@ It also runs on an enhanced IIe with 128K (tested in MAME), where `timing_init` 
 vertical-blank latch, so every effect is paced by the cycle-counted fallback.
 
 The resident 65C02 program, `AFTERDUSK`, loads at `$6000` from a DOS 3.3 disk. Every effect is
-linked into one more file, `FX`, which HELLO loads at `$2000` just before `BRUN AFTERDUSK`.
-After Dusk copies `FX` to aux memory at start-up, and copies each effect from there into the
-overlay slot at `$8800` when its turn comes, so the disk is never touched after boot.
+linked into one of two more files, `FX` (effects 0-13) and `FX2` (Fish!, with its art and sea
+floor), which HELLO loads at `$2000` in turn just before `BRUN AFTERDUSK`. After Dusk copies
+them to aux memory at start-up (`FX` at `$2000`, `FX2` at `$6000`), and copies each effect from
+there into the overlay slot at `$8800` when its turn comes, so the disk is never touched after
+boot. Fish! also copies its drawing code into FXRAM and the language card when it starts, and
+reads its art from `FX2` in aux as it draws.
 
 ## Commands
 
 ```bash
 tools/bootstrap.sh                 # once: .tools/venv (py65, pytest, Pillow) + .tools/dos33fsprogs
-./build.sh                         # -> build/AFTERDUSK.dsk
+./build.sh                         # -> build/AFTERDUSK.dsk (Fish! with 4-dot hops)
+FISH_HOP=2 BUILD_DIR=build/hop2 ./build.sh             # Fish! with the original's 2-dot hops
+ONLY_FX=14 OUT=build/FISH.dsk ./build.sh               # a disk that shows one effect from power-on
 FX_TICKS=120 OUT=build/AFTERDUSK-test.dsk ./build.sh   # 2-second effects, for emulator tests
 .tools/venv/bin/pytest tests -q    # host tests (py65 simulator) + emulator tests if ROMs exist
 tests/mame/run.sh apple2c tests/mame/boot.lua 30       # one emulator test
@@ -40,9 +45,13 @@ Needs `ca65`/`ld65` (cc65) and `mame` on PATH. Emulator ROM images are not in th
 - `src/` 65C02 sources (ca65). `main.s` links first so `start` is at `$6000`.
   `config.inc` holds every shared address below. `after-dusk.cfg` is the linker layout.
 - `src/fx_*.s` one effect each, in its own segment `FXn` (n = its id), starting with
-  `jmp init` and `jmp step`. To add one: a segment and an `OVLn` area in `after-dusk.cfg`; in
-  `main.s` the `.import __FXn_LOAD__, __FXn_SIZE__` line and entries in `fx_table` and `fx_slow`;
-  `NFX` in `config.inc` and `tests/fxcommon.py`.
+  `jmp init` and `jmp step`. Fish! (`fx_fish.s`) includes `fish_draw.inc` (its cache engine:
+  pre-shifted creatures composed row by row, every piece paid for before it runs) and
+  `fish_init.inc` (its init-only code). To add one: a segment and an `OVLn` area in
+  `after-dusk.cfg`, loaded from `FXFILE2` (`FX2`) rather than `FXFILE`; in `main.s` the
+  `.import __FXn_LOAD__, __FXn_SIZE__` line and entries in `fx_table` and `fx_slow`; `NFX` in
+  `config.inc` and `tests/fxcommon.py`. Both files are nearly full (FX 15,944 and FX2 16,021 of
+  16,384 bytes): another effect needs room made or a third file.
 - `basic/hello.bas` the HELLO program: bumps a seed in the text file `SEED`, POKEs it to `$0300`,
   then `BLOAD FX` and `BRUN AFTERDUSK`.
 - `tools/` generators (`gen_tables.py`, `gen_art.py`), `bootstrap.sh`, FloppyEmu tools.
@@ -63,23 +72,23 @@ Memory:
 | `$90`–`$9F` | sprite-engine scratch |
 | `$0300`–`$0301` | seed from HELLO |
 | `$0310`–`$031F` | status block for tests |
-| `$0800`–`$1FFF` | `FXRAM`, private to the running effect |
-| `$2000` / `$4000` | hi-res page 1 / page 2 (the FX file sits here until start-up copies it) |
+| `$0800`–`$1FFF` | `FXRAM`, private to the running effect (Fish!: its live background `$0800`, drawing code `$0E00`, state `$1C00`) |
+| `$2000` / `$4000` | hi-res page 1 / page 2 (the FX files sit here until start-up copies them; Fish! fills page 2 with its caches and kernels, and shows page 1 only) |
 | `$6000`–`$87FF` | the resident program (10,240 bytes max) |
 | `$8800`–`$95FF` | overlay slot: the running effect's code (3,584 bytes max per effect) |
 | `$D000`–`$F5FF` | language card bank 1: pre-shifted sprites and Warp's tables, built at startup |
 | `$F600`–`$F6FF` | language card: `aux_fetch` and `aux_copy`, the copy loops that read aux memory |
 | `$F700`–`$FFF9` | language card: Fish!'s code that reads aux memory (copied from FX2 when it starts); `$FFFA`–`$FFFF` are the vectors, never written |
 | aux `$0800`–`$1FFF`, `$A000`–`$BFFF` | Fish!'s shift tables and a mirrored copy of its art, built when it starts |
-| aux `$2000`–`$5FFF` | the FX file: every effect's code, one after another (16K max) |
-| aux `$6000`–`$9FFF` | the FX2 file: Fish!'s code, art and floor (read in place) |
+| aux `$2000`–`$5FFF` | the FX file: effects 0-13, one after another (16K max) |
+| aux `$6000`–`$9FFF` | the FX2 file: Fish!'s code, art and sea floor, read in place (16K max) |
 
 Status block: `$0310` current effect (`$FF` before the first), `$0311` effects started,
 `$0312`/`$0313` steps since boot, `$0314` 1 = vertical-blank pacing, `$0315` 1 = IIc Plus.
 
 Effect ids: 0 Flying Toasters, 1 Warp, 2 Starry Night, 3 Zot!, 4 Can of Worms, 5 Lissajous,
 6 Nightlines, 7 String Theory, 8 Rose, 9 Doodles, 10 Shapes, 11 Spheres, 12 Bouncing Ball,
-13 Rainstorm.
+13 Rainstorm, 14 Fish!.
 
 Each effect's step must finish inside its ticks on a 1 MHz IIc (`tests/fxcommon.py`
 checks the worst step against `ticks × 17,030 − 300` cycles and the median against 85% of
@@ -101,6 +110,14 @@ frames to a deadline. `tests/mame/pacing.lua` checks every effect's real rate. F
 - Shapes: sizes capped (height x (width + 161) <= 13,851) so the biggest fills in 3 ticks.
 - Spheres: radius 12-44 (58 was planned) so the biggest circle fills in 4 ticks.
 - Rainstorm: 45 drops (55 were planned) at 3 ticks.
+- Fish!: 3 creatures (10 in the original; a Seaweed counts as one), all 14 kinds, 4-dot hops on
+  beats twice the original's (the same speed in coarser steps; `FISH_HOP=2` builds the original's
+  2-dot hops, which hold fewer). It steps every tick: a lone hop at sea is about 12,000 cycles of
+  the tick's 17,030, over the floor 19,000, a crossing more, so a tick holds one hop and the
+  count is set by hops falling due together. Each hop keeps within one tick of its beat (most
+  start a tick early) except, rarely (about once in five minutes), when three creatures cross
+  over the floor; every step still fits its tick, and without a vertical blank the step pads
+  itself to a tick (`tests/mame/fish_rate.lua`).
 
 Speeds follow the originals, timed from video of the real After Dark modules (Afterglow);
 where the IIc draws fewer updates a second, each update moves further.
