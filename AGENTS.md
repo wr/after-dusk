@@ -15,14 +15,20 @@ randomizer. It cycles black-and-white hi-res effects (see Effect ids below) in r
 It also runs on an enhanced IIe with 128K (tested in MAME), where `timing_init` finds no
 vertical-blank latch, so every effect is paced by the cycle-counted fallback.
 
-The resident 65C02 program, `AFTERDUSK`, loads at `$6000` from a DOS 3.3 disk. Every effect is
-linked into one of three more files, `FX` (effects 0-13), `FX2` (Fish!, with its art and sea
-floor) and `FX3` (effects 15 on), which HELLO loads at `$2000` in turn, handing each to
-`AFTERDUSK` to put away. `FX` and `FX2` stay in aux memory (`FX` at `$2000`, `FX2` at `$6000`).
+The resident 65C02 program, `AFTERDUSK`, loads at `$6000` from a DOS 3.3 disk, last of all. Every
+effect is linked into one of three more files, `FX` (effects 0-13), `FX2` (Fish!, with its art and
+sea floor) and `FX3` (effects 15 on), which HELLO loads at `$4000` in turn, handing each to a stash
+routine in `src/splash.s` to put away. `FX` and `FX2` stay in aux memory (`FX` at `$2000`, `FX2` at `$6000`).
 `FX3` waits in aux `$A000` until the last file is loaded, then moves to main `$A000`, which DOS
 no longer needs. Each effect is copied from there into the overlay slot at `$8800` when its turn
 comes, so the disk is never touched after boot. Fish! also copies its drawing code into FXRAM and the language card when it starts, and
 reads its art from `FX2` in aux as it draws.
+
+While the disk loads, the boot splash (`src/splash.s`) draws a title picture on hi-res page 1 and
+says what's loading in the last four text lines. It runs from a hook on the one place DOS calls its
+disk routine, between sector reads, so each tick has to stay short (`tests/test_splash.py` checks
+it), and nothing may load onto `$2000`-`$3FFF` during boot. The picture is a recorded paint order
+(`tools/gen_splash.py`), played a step at a time.
 
 ## Commands
 
@@ -51,13 +57,19 @@ Needs `ca65`/`ld65` (cc65) and `mame` on PATH. Emulator ROM images are not in th
   `fish_init.inc` (its init-only code). To add one: a segment and an `OVLn` area in
   `after-dusk.cfg`, loaded from `FXFILE3` (`FX3`); in `main.s` the
   `.import __FXn_LOAD__, __FXn_SIZE__` line and entries in `fx_table` and `fx_slow`; `NFX` in
-  `config.inc` and `tests/fxcommon.py`. FX and FX2 are nearly full (15,970 and 16,021 of 16,384
+  `config.inc` and `tests/fxcommon.py`; in `splash.s` a stage (its tables, `NSTAGES`, the total in
+  `of_18`) and an icon in `tools/splash_art.json`. FX and FX2 are nearly full (15,970 and 16,021 of 16,384
   bytes); FX3 has room (4,372 of 8,192). `main.s`'s `CODE` is padded to a fixed size so the
   routines linked after it keep the addresses their timing was measured at: put new data in
   `FXTABLE` or `ONCE`.
-- `basic/hello.bas` the HELLO program: bumps a seed in the text file `SEED`, POKEs it to `$0300`,
-  loads `AFTERDUSK` and the effects files, then `CALL 24576` to start.
-- `tools/` generators (`gen_tables.py`, `gen_art.py`), `bootstrap.sh`, FloppyEmu tools.
+- `src/splash.s` the boot splash: HELLO's machine code, which rides in the HELLO file behind the
+  BASIC program, at `$0B00`.
+- `basic/hello.bas` the HELLO program: starts the splash, bumps a seed in the text file `SEED`,
+  POKEs it to `$0300`, loads the `PAINT` file, the effects files and `AFTERDUSK`, then `CALL 24576`
+  to start. Its `CALL`s use `splash.s`'s fixed entry points.
+- `tools/` generators (`gen_tables.py`, `gen_art.py`, `gen_splash.py`), `join_hello.py` (adds the
+  splash's code to HELLO), `splash_art.json` (the splash's picture and icons), `bootstrap.sh`,
+  FloppyEmu tools.
 - `vendor/dos33-master-jan83.dsk` the base disk image (see `THIRD-PARTY-NOTICES.md`).
 - `tests/` host tests on the py65 simulator (`sim.py`), emulator tests in `tests/mame/`.
 
@@ -67,6 +79,7 @@ Memory:
 
 | Range | Use |
 |---|---|
+| `$06`–`$09` | during boot: the splash's scratch (free under Applesoft and DOS) |
 | `$10`–`$1F` | drawing parameters and scratch (`hires.s`) |
 | `$20`–`$2F` | core state: `RNG` `$20`, `TICKS` `$22`, `DISP` `$24` |
 | `$30`–`$3F` | sprite engine |
@@ -75,9 +88,10 @@ Memory:
 | `$90`–`$9F` | sprite-engine scratch |
 | `$0300`–`$0301` | seed from HELLO |
 | `$0310`–`$031F` | status block for tests |
-| `$0800`–`$1FFF` | `FXRAM`, private to the running effect (Fish!: its live background `$0800`, drawing code `$0E00`, state `$1C00`) |
-| `$2000` / `$4000` | hi-res page 1 / page 2 (the FX files sit here until start-up copies them; Fish! fills page 2 with its caches and kernels and shows page 1 only; Snake draws its next maze on the hidden page; Life II keeps its board in page 2 and shows page 1) |
+| `$0800`–`$1FFF` | `FXRAM`, private to the running effect (Fish!: its live background `$0800`, drawing code `$0E00`, state `$1C00`). During boot: the HELLO file (BASIC at `$0801`, the splash from `$0B00`) and the splash's row tables at `$1E00` |
+| `$2000` / `$4000` | hi-res page 1 / page 2 (during boot page 1 shows the splash, and each effects file passes through `$4000`-`$7FFF` on its way to aux; Fish! fills page 2 with its caches and kernels and shows page 1 only; Snake draws its next maze on the hidden page; Life II keeps its board in page 2 and shows page 1) |
 | `$6000`–`$87FF` | the resident program (10,240 bytes max) |
+| `$8000`–`$95DF` | during boot: the `PAINT` file, the rest of the splash's picture (`AFTERDUSK` lands on its start last, by when that part has been drawn) |
 | `$8800`–`$95FF` | overlay slot: the running effect's code (3,584 bytes max per effect) |
 | `$A000`–`$BFFF` | the FX3 file: effects 15 on (8K max), once DOS is finished with |
 | `$D000`–`$F5FF` | language card bank 1: pre-shifted sprites and Warp's tables, built at startup |
@@ -147,3 +161,4 @@ where the IIc draws fewer updates a second, each update moves further.
 - Never build the disk from scratch; always start from the vendored master.
 - Never set bit 7 of a screen byte.
 - Never use interrupt-driven code; interrupts stay masked (`SEI`).
+- Never load anything onto `$2000`-`$3FFF` during boot. The splash is on it.

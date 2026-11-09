@@ -35,8 +35,9 @@ Control Panel; at Fast, effects would probably run two or three times too fast.
 
 ## Getting it
 
-Download `AFTERDUSK.dsk` from the [latest release](../../releases/latest) and boot it. The first
-effect starts in about half a minute.
+Download `AFTERDUSK.dsk` from the [latest release](../../releases/latest) and boot it. While the
+disk loads, a title picture draws itself and names each screen saver as it comes in. The first
+effect starts about a minute after you switch on.
 
 - **Skip an effect:** press any key.
 - **Start over:** Ctrl-Reset.

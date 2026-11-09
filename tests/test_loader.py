@@ -1,9 +1,7 @@
-"""The effect loader. HELLO loads the FX2 file at $2000 and calls fx2_stash,
-which copies it to aux $6000-$9FFF; it loads the FX3 file at $2000 and calls
-fx3_stash, which copies it to aux $A000-$BFFF; then it loads the FX file at
-$2000, and start copies $2000-$5FFF to aux memory and moves FX3 on to main
-$A000-$BFFF. Each effect's code is copied into the overlay slot at $8800 when
-its turn comes."""
+"""The effect loader. HELLO loads each effects file at $4000 and puts it in its
+home in aux memory (see test_splash.py); start moves FX3 on to main $A000-$BFFF.
+Each effect's code is copied into the overlay slot at $8800 when its turn
+comes."""
 import random
 
 import pytest
@@ -87,54 +85,6 @@ def test_table_matches_the_files(s):
 
 def test_fx3_file_fits(built):
     assert 0 < len(fx3_file()) <= FX3_END - FX3_BASE
-
-
-def test_stash_copies_to_aux(built):
-    s = Sim()
-    rnd = random.Random(5)
-    junk = bytes(rnd.randrange(256) for _ in range(FX_END - FX_BASE))
-    s.mem.ram[FX_BASE:FX_END] = junk
-    s.call("fx_stash", max_cycles=2_000_000)
-    assert bytes(s.mem.aux[FX_BASE:FX_END]) == junk
-    assert bytes(s.mem.ram[FX_BASE:FX_END]) == junk
-    assert not s.mem.rd_aux and not s.mem.wr_aux
-
-
-def test_fx2_stash_copies_to_aux(built):
-    """HELLO calls fx2_stash ($6003) from BASIC, so it may use only zero page
-    $06-$09 (free under Applesoft and DOS), must leave main memory alone and
-    writes on main, and must return."""
-    s = Sim()
-    assert s.addr("fx2_stash") == s.peek16(0x6004) and s.peek(0x6003) == 0x4C
-    rnd = random.Random(6)
-    junk = bytes(rnd.randrange(256) for _ in range(FX_END - FX_BASE))
-    s.mem.ram[FX_BASE:FX_END] = junk
-    before = bytes(s.mem.ram)
-    s.call("fx2_stash", max_cycles=2_000_000)
-    assert bytes(s.mem.aux[FX2_BASE:FX2_END]) == junk
-    assert bytes(s.mem.aux[:FX2_BASE]) == bytes(FX2_BASE), "aux below $6000 untouched"
-    assert not s.mem.rd_aux and not s.mem.wr_aux
-    after = bytes(s.mem.ram)
-    changed = [a for a in range(0x10000) if before[a] != after[a] and not 0x100 <= a < 0x200]
-    assert all(0x06 <= a <= 0x09 for a in changed), [hex(a) for a in changed]
-
-
-def test_fx3_stash_copies_to_aux(built):
-    """HELLO calls fx3_stash ($6006) from BASIC, under the same rules as
-    fx2_stash; only the first 8K at $2000 is FX3."""
-    s = Sim()
-    assert s.addr("fx3_stash") == s.peek16(0x6007) and s.peek(0x6006) == 0x4C
-    rnd = random.Random(7)
-    junk = bytes(rnd.randrange(256) for _ in range(FX3_END - FX3_BASE))
-    s.mem.ram[FX_BASE:FX_BASE + len(junk)] = junk
-    before = bytes(s.mem.ram)
-    s.call("fx3_stash", max_cycles=2_000_000)
-    assert bytes(s.mem.aux[FX3_BASE:FX3_END]) == junk
-    assert bytes(s.mem.aux[:FX3_BASE]) == bytes(FX3_BASE), "aux below $A000 untouched"
-    assert not s.mem.rd_aux and not s.mem.wr_aux
-    after = bytes(s.mem.ram)
-    changed = [a for a in range(0x10000) if before[a] != after[a] and not 0x100 <= a < 0x200]
-    assert all(0x06 <= a <= 0x09 for a in changed), [hex(a) for a in changed]
 
 
 def test_fx3_restore_copies_to_main(built):

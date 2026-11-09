@@ -45,7 +45,7 @@ done
 ld65 -C "$OBJ/after-dusk.cfg" -Ln "$BUILD_DIR/afterdusk.lbl" -m "$BUILD_DIR/afterdusk.map" -o "$BUILD_DIR/afterdusk.bin" "${objs[@]}"
 
 # The linker writes the resident program and the three effects files,
-# $BUILD_DIR/fx.bin, fx2.bin and fx3.bin (all for $2000), and refuses anything
+# $BUILD_DIR/fx.bin, fx2.bin and fx3.bin (all loaded at $4000), and refuses anything
 # that outgrows its area (after-dusk.cfg).
 size=$(wc -c < "$BUILD_DIR/afterdusk.bin" | tr -d ' ')
 fxsize=$(wc -c < "$BUILD_DIR/fx.bin" | tr -d ' ')
@@ -53,6 +53,7 @@ fx2size=$(wc -c < "$BUILD_DIR/fx2.bin" | tr -d ' ')
 fx3size=$(wc -c < "$BUILD_DIR/fx3.bin" | tr -d ' ')
 
 "$TOK" < basic/hello.bas > "$OBJ/HELLO.tok"
+"$PY" tools/join_hello.py "$OBJ/HELLO.tok" "$BUILD_DIR/splash.bin"
 printf '\xb0\x8d' > "$OBJ/SEED.txt"           # "0" + Return, high-bit ASCII
 
 cp "$BASE" "$OUT"
@@ -60,9 +61,10 @@ cp "$BASE" "$OUT"
 "$DOS33" -y "$OUT" DELETE HELLO >/dev/null
 "$DOS33" -y "$OUT" SAVE A "$OBJ/HELLO.tok" HELLO >/dev/null
 "$DOS33" -y -a 0x6000 "$OUT" BSAVE "$BUILD_DIR/afterdusk.bin" AFTERDUSK >/dev/null
-"$DOS33" -y -a 0x2000 "$OUT" BSAVE "$BUILD_DIR/fx.bin" FX >/dev/null
-"$DOS33" -y -a 0x2000 "$OUT" BSAVE "$BUILD_DIR/fx2.bin" FX2 >/dev/null
-"$DOS33" -y -a 0x2000 "$OUT" BSAVE "$BUILD_DIR/fx3.bin" FX3 >/dev/null
+"$DOS33" -y -a 0x4000 "$OUT" BSAVE "$BUILD_DIR/fx.bin" FX >/dev/null
+"$DOS33" -y -a 0x4000 "$OUT" BSAVE "$BUILD_DIR/fx2.bin" FX2 >/dev/null
+"$DOS33" -y -a 0x4000 "$OUT" BSAVE "$BUILD_DIR/fx3.bin" FX3 >/dev/null
+"$DOS33" -y -a 0x8000 "$OUT" BSAVE "$BUILD_DIR/paint.bin" PAINT >/dev/null
 "$DOS33" -y "$OUT" SAVE T "$OBJ/SEED.txt" SEED >/dev/null
 test "$(wc -c < "$OUT" | tr -d ' ')" = 143360
 echo "built $OUT ($size bytes of program, $fxsize + $fx2size + $fx3size of effects, FX_TICKS=$FX_TICKS)"

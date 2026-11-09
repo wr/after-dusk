@@ -4,6 +4,7 @@ build/
 src/tables.inc
 src/art.inc
 src/fish_art.inc
+src/splash_art.inc
 src/*_tables.inc
 __pycache__/
 .pytest_cache/

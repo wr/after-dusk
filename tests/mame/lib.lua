@@ -74,12 +74,12 @@ function T.hires_on()
   return (T.peek(0xC01D) & 0x80) ~= 0 and (T.peek(0xC01A) & 0x80) == 0
 end
 
--- Wait for After Dusk to start: DOS loads the whole program from disk first,
--- which takes a while (and longer when HELLO has to create the SEED file).
--- HELLO calls into the program once on the way (fx2_stash, with the screen
--- still in text), so started means running with hi-res on.
+-- Wait for After Dusk to start: DOS loads everything from disk first, which
+-- takes about a minute (and longer when HELLO has to create the SEED file),
+-- with the boot splash showing hi-res all the while, so started means the
+-- resident program is running.
 function T.wait_started()
-  return T.check(T.wait_until(function() return T.running() and T.hires_on() end, 60 * 60),
+  return T.check(T.wait_until(function() return T.running() and T.hires_on() end, 110 * 60),
                  "After Dusk never started")
 end
 

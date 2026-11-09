@@ -56,12 +56,12 @@ KEYHELD   = $0316             ; 1 while the key that last skipped is still down
 NFX       = 18                ; effects
 OVL       = $8800             ; overlay slot, $8800-$95FF: jmp init at OVL,
 OVL_STEP  = OVL+3             ; jmp step at OVL+3
-FXSTORE   = $2000             ; the FX file: main $2000-$5FFF at boot, then aux
+FXSTORE   = $2000             ; the FX file: its home in aux (loaded at main $4000)
 FXSTORE_END = $6000
-FXSTORE2  = $6000             ; the FX2 file: main $2000-$5FFF at boot, then
-FXSTORE2_END = $A000          ; aux $6000-$9FFF
-FXSTORE3  = $A000             ; the FX3 file: main $2000-$3FFF at boot, then aux
-FXSTORE3_END = $C000          ; $A000-$BFFF until start moves it to main $A000-$BFFF
+FXSTORE2  = $6000             ; the FX2 file: aux $6000-$9FFF (loaded at main $4000)
+FXSTORE2_END = $A000
+FXSTORE3  = $A000             ; the FX3 file: aux $A000-$BFFF (loaded at main $4000)
+FXSTORE3_END = $C000          ; until start moves it to main $A000-$BFFF
 
 ; ---- IIc memory switches ----
 RDMAINRAM = $C002             ; reads of $0200-$BFFF from main memory

@@ -7,17 +7,16 @@
 ; ticks have passed.
 ;
 ; The effects themselves aren't in this program. They come in three files that
-; HELLO loads at $2000 one after the other, once it has loaded this program:
-; FX2, which it hands to fx2_stash (at $6003) to copy to aux $6000; FX3, which
-; fx3_stash (at $6006) copies to aux $A000; then FX, which start copies to aux
-; $2000. Once DOS is finished with, start moves FX3 on to main $A000, because
+; HELLO loads at $4000 one after the other, before this program, while the boot
+; splash draws (src/splash.s): FX goes to aux $2000, FX3 to aux $A000 and FX2 to
+; aux $6000. Once DOS is finished with, start moves FX3 on to main $A000, because
 ; Fish! builds tables in aux $A000 up. Each effect is copied into the overlay
 ; slot at $8800 when its turn comes. See after-dusk.cfg.
 
 .include "config.inc"
 
 .export start, restart, setup, begin_effect, step_once, pick_next, normalize_display
-.export fx_table, fx_count, fx_stash, fx2_stash, fx3_stash, fx3_restore
+.export fx_table, fx_count, fx3_restore
 .export lc_install, load_fx, aux_fetch, main_fetch, aux_copy
 
 .import timing_init, wait_ticks, timing_sync, rng_seed, rng_below, key_pressed
@@ -37,22 +36,16 @@
 MAIN_CODE_SIZE = $1B9   ; this file's CODE, kept the same as it grows (see below)
 
 FXOFF  = CORE+6        ; current effect's offset into fx_table (id * 6)
-F2SRC   = $06           ; 2: fx2_stash's source, in zero page that
-F2DST   = $08           ; 2: Applesoft and DOS leave free
-
 SOFTEV  = $03F2         ; reset vector, and its check byte at $03F4
 PWREDUP = $03F4
 
 .segment "CODE"
 
-; HELLO enters at fixed addresses, so they lead the program.
-start:  jmp boot                ; CALL 24576 ($6000), once FX is loaded
-        jmp fx2_stash           ; CALL 24579 ($6003), once FX2 is loaded
-        jmp fx3_stash           ; CALL 24582 ($6006), once FX3 is loaded
+; HELLO enters here, once everything is loaded.
+start:  jmp boot                ; CALL 24576 ($6000)
 
 boot:
         sei
-        jsr fx_stash            ; the effects, before anything clears the screen
         jsr setup
         jsr fx3_restore         ; DOS is finished with: FX3 can have its memory
         jsr rng_seed
@@ -190,25 +183,6 @@ normalize_display:
 @done:  rts
 
 ; ---------------------------------------------------------------- loader
-; fx_stash: copy main $2000-$5FFF, where HELLO loaded the FX file, to the
-; same addresses in aux memory. Once, at start; Ctrl-Reset keeps the copy.
-fx_stash:
-        stz LSRC
-        lda #>FXSTORE
-        sta LSRC+1
-        ldy #0
-        sta WRCARDRAM           ; writes to aux; reads (and this code) main
-@copy:  lda (LSRC),y
-        sta (LSRC),y
-        iny
-        bne @copy
-        inc LSRC+1
-        lda LSRC+1
-        cmp #>FXSTORE_END
-        bne @copy
-        sta WRMAINRAM
-        rts
-
 ; lc_install: put aux_fetch and aux_copy into language-card RAM. setup calls
 ; it once the card's RAM is switched in.
 lc_install:
@@ -255,37 +229,6 @@ load_fx:
 ; Run once, from BASIC or at boot, so it sits after all the resident code:
 ; code added here doesn't move the drawing routines' loops, whose timing can
 ; depend on where they cross page boundaries.
-; fx2_stash: copy main $2000-$5FFF, where HELLO has just loaded the FX2 file,
-; to aux $6000-$9FFF. fx3_stash: copy main $2000-$3FFF, where HELLO has just
-; loaded the FX3 file, to aux $A000-$BFFF. HELLO calls them from BASIC before
-; loading the next file over the same memory, so they keep to zero page
-; $06-$09, leave interrupts as they are, and return to BASIC with writes back
-; on main.
-fx2_stash:
-        lda #>FXSTORE2
-        ldx #>FXSTORE2_END
-        bra stash
-fx3_stash:
-        lda #>FXSTORE3
-        ldx #>FXSTORE3_END
-stash:  ldy #0
-        sty F2SRC
-        sty F2DST
-        sta F2DST+1
-        lda #>FXSTORE
-        sta F2SRC+1
-        sta WRCARDRAM           ; writes to aux; reads (and this code) main
-@copy:  lda (F2SRC),y
-        sta (F2DST),y
-        iny
-        bne @copy
-        inc F2SRC+1
-        inc F2DST+1
-        cpx F2DST+1
-        bne @copy
-        sta WRMAINRAM
-        rts
-
 ; fx3_restore: copy FX3 from aux to main $A000-$BFFF. Once, at boot, after
 ; setup has installed aux_fetch: DOS is no longer needed by then. Ctrl-Reset
 ; doesn't come here: Fish! may have overwritten the aux copy, and the main
