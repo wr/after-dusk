@@ -11,6 +11,7 @@ After Dusk turns an Apple II into an ambient display that matches a vintage Mac 
 | ![Nightlines](docs/screenshots/nightlines.gif)<br>**Nightlines** | ![String Theory](docs/screenshots/string-theory.gif)<br>**String Theory** | ![Rose](docs/screenshots/rose.gif)<br>**Rose** |
 | ![Doodles](docs/screenshots/doodles.gif)<br>**Doodles** | ![Shapes](docs/screenshots/shapes.gif)<br>**Shapes** | ![Spheres](docs/screenshots/spheres.gif)<br>**Spheres** |
 | ![Bouncing Ball](docs/screenshots/bouncing-ball.gif)<br>**Bouncing Ball** | ![Rainstorm](docs/screenshots/rainstorm.gif)<br>**Rainstorm** | ![Fish!](docs/screenshots/fish.gif)<br>**Fish!** |
+| ![Hard Rain](docs/screenshots/hard-rain.gif)<br>**Hard Rain** | ![Snake](docs/screenshots/snake.gif)<br>**Snake** | ![Life II](docs/screenshots/life-ii.gif)<br>**Life II** |
 
 ## Wait, why would an Apple II need a screen saver?
 

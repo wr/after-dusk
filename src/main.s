@@ -6,16 +6,19 @@
 ; its step every ticks_per_step ticks until a key is pressed or FX_TICKS
 ; ticks have passed.
 ;
-; The effects themselves aren't in this program. They come in two files that
+; The effects themselves aren't in this program. They come in three files that
 ; HELLO loads at $2000 one after the other, once it has loaded this program:
-; FX2 first, which it hands to fx2_stash (at $6003) to copy to aux $6000;
-; then FX, which start copies to aux $2000. Each effect is copied from aux
-; into the overlay slot at $8800 when its turn comes. See after-dusk.cfg.
+; FX2, which it hands to fx2_stash (at $6003) to copy to aux $6000; FX3, which
+; fx3_stash (at $6006) copies to aux $A000; then FX, which start copies to aux
+; $2000. Once DOS is finished with, start moves FX3 on to main $A000, because
+; Fish! builds tables in aux $A000 up. Each effect is copied into the overlay
+; slot at $8800 when its turn comes. See after-dusk.cfg.
 
 .include "config.inc"
 
-.export start, restart, begin_effect, step_once, pick_next, normalize_display
-.export fx_table, fx_count, fx_stash, fx2_stash, lc_install, load_fx, aux_fetch, aux_copy
+.export start, restart, setup, begin_effect, step_once, pick_next, normalize_display
+.export fx_table, fx_count, fx_stash, fx2_stash, fx3_stash, fx3_restore
+.export lc_install, load_fx, aux_fetch, main_fetch, aux_copy
 
 .import timing_init, wait_ticks, timing_sync, rng_seed, rng_below, key_pressed
 .import clear_page, copy_page, show_page1, wipe_to_black, plot
@@ -28,9 +31,12 @@
 .import __FX8_LOAD__, __FX8_SIZE__, __FX9_LOAD__, __FX9_SIZE__
 .import __FX10_LOAD__, __FX10_SIZE__, __FX11_LOAD__, __FX11_SIZE__
 .import __FX12_LOAD__, __FX12_SIZE__, __FX13_LOAD__, __FX13_SIZE__
-.import __FX14_LOAD__, __FX14_SIZE__
+.import __FX14_LOAD__, __FX14_SIZE__, __FX15_LOAD__, __FX15_SIZE__
+.import __FX16_LOAD__, __FX16_SIZE__, __FX17_LOAD__, __FX17_SIZE__
 
-FXOFF   = CORE+6        ; current effect's offset into fx_table (id * 6)
+MAIN_CODE_SIZE = $1B9   ; this file's CODE, kept the same as it grows (see below)
+
+FXOFF  = CORE+6        ; current effect's offset into fx_table (id * 6)
 F2SRC   = $06           ; 2: fx2_stash's source, in zero page that
 F2DST   = $08           ; 2: Applesoft and DOS leave free
 
@@ -42,11 +48,13 @@ PWREDUP = $03F4
 ; HELLO enters at fixed addresses, so they lead the program.
 start:  jmp boot                ; CALL 24576 ($6000), once FX is loaded
         jmp fx2_stash           ; CALL 24579 ($6003), once FX2 is loaded
+        jmp fx3_stash           ; CALL 24582 ($6006), once FX3 is loaded
 
 boot:
         sei
         jsr fx_stash            ; the effects, before anything clears the screen
         jsr setup
+        jsr fx3_restore         ; DOS is finished with: FX3 can have its memory
         jsr rng_seed
         lda #$FF
         sta ST_FX
@@ -181,19 +189,130 @@ normalize_display:
         jsr show_page1
 @done:  rts
 
-; ---------------------------------------------------------------- table
+; ---------------------------------------------------------------- loader
+; fx_stash: copy main $2000-$5FFF, where HELLO loaded the FX file, to the
+; same addresses in aux memory. Once, at start; Ctrl-Reset keeps the copy.
+fx_stash:
+        stz LSRC
+        lda #>FXSTORE
+        sta LSRC+1
+        ldy #0
+        sta WRCARDRAM           ; writes to aux; reads (and this code) main
+@copy:  lda (LSRC),y
+        sta (LSRC),y
+        iny
+        bne @copy
+        inc LSRC+1
+        lda LSRC+1
+        cmp #>FXSTORE_END
+        bne @copy
+        sta WRMAINRAM
+        rts
+
+; lc_install: put aux_fetch and aux_copy into language-card RAM. setup calls
+; it once the card's RAM is switched in.
+lc_install:
+        ldx #<__LCCODE_SIZE__
+:       lda __LCCODE_LOAD__-1,x
+        sta aux_fetch-1,x
+        dex
+        bne :-
+        rts
+
+; load_fx: copy effect A's code into the overlay slot, from aux memory or, for
+; the FX3 file, main memory, in whole pages (the slot is whole pages, so the
+; overrun stays inside it).
+load_fx:
+        asl a                   ; X = A * 6
+        sta LSRC
+        asl a
+        clc
+        adc LSRC
+        tax
+        lda fx_table,x
+        sta LSRC
+        lda fx_table+1,x
+        sta LSRC+1
+        stz LDST
+        lda #>OVL
+        sta LDST+1
+        lda fx_table+2,x        ; pages = size high byte, plus one if the
+        cmp #1                  ; low byte isn't 0
+        lda fx_table+3,x
+        adc #0
+        tax                     ; never 0: every overlay starts with two jmps
+        lda LSRC+1              ; (0 would copy 256 pages over everything)
+        cmp #>FXSTORE3
+        bcc :+
+        jmp main_fetch
+:       jmp aux_fetch
+
+        ; This file links first, so its CODE must stay this size: the drawing
+        ; routines after it keep the addresses their timing was measured at.
+        .res MAIN_CODE_SIZE - (* - start)
+
+.segment "ONCE"
+; Run once, from BASIC or at boot, so it sits after all the resident code:
+; code added here doesn't move the drawing routines' loops, whose timing can
+; depend on where they cross page boundaries.
+; fx2_stash: copy main $2000-$5FFF, where HELLO has just loaded the FX2 file,
+; to aux $6000-$9FFF. fx3_stash: copy main $2000-$3FFF, where HELLO has just
+; loaded the FX3 file, to aux $A000-$BFFF. HELLO calls them from BASIC before
+; loading the next file over the same memory, so they keep to zero page
+; $06-$09, leave interrupts as they are, and return to BASIC with writes back
+; on main.
+fx2_stash:
+        lda #>FXSTORE2
+        ldx #>FXSTORE2_END
+        bra stash
+fx3_stash:
+        lda #>FXSTORE3
+        ldx #>FXSTORE3_END
+stash:  ldy #0
+        sty F2SRC
+        sty F2DST
+        sta F2DST+1
+        lda #>FXSTORE
+        sta F2SRC+1
+        sta WRCARDRAM           ; writes to aux; reads (and this code) main
+@copy:  lda (F2SRC),y
+        sta (F2DST),y
+        iny
+        bne @copy
+        inc F2SRC+1
+        inc F2DST+1
+        cpx F2DST+1
+        bne @copy
+        sta WRMAINRAM
+        rts
+
+; fx3_restore: copy FX3 from aux to main $A000-$BFFF. Once, at boot, after
+; setup has installed aux_fetch: DOS is no longer needed by then. Ctrl-Reset
+; doesn't come here: Fish! may have overwritten the aux copy, and the main
+; copy is still good.
+fx3_restore:
+        stz LSRC
+        stz LDST
+        lda #>FXSTORE3
+        sta LSRC+1
+        sta LDST+1
+        ldx #>(FXSTORE3_END - FXSTORE3)
+        jmp aux_fetch
+
+.segment "FXTABLE"
 ; Without vertical blank (the cycle-counted fallback), ticks to wait after
 ; each effect's step: its ticks minus its typical work (measured medians:
 ; toasters 3.8 ticks, Warp 1.6, Starry Night 0.1, Zot! idle, worms 1.7,
 ; Lissajous 0.9, Nightlines 1.6, String Theory 2.2, Rose 1.4, Doodles 0.26,
-; Shapes 1.3, Spheres 1.2, Bouncing Ball 0.4, Rainstorm 2.3; Fish! 0: it
-; steps every tick and pads its own step to a tick in fallback mode).
+; Shapes 1.3, Spheres 1.2, Bouncing Ball 0.4, Rainstorm 2.3, Hard Rain 0.4,
+; Snake 0.1, Life II 3.0; Fish! 0: it steps every tick and pads its own step
+; to a tick in fallback mode).
 fx_slow:
-        .byte 0, 0, 4, 3, 1, 1, 3, 4, 1, 2, 2, 3, 2, 1, 0
+        .byte 0, 0, 4, 3, 1, 1, 3, 4, 1, 2, 2, 3, 2, 1, 0, 3, 2, 3
 
-; Per effect: where it is in aux memory and its size, wipe first (1/0),
-; ticks per step. The FX file is effects 0-13 one after another from aux
-; $2000; FX2 is effect 14 on, from aux $6000.
+; Per effect: where it is and its size, wipe first (1/0), ticks per step. The
+; FX file is effects 0-13 one after another from aux $2000; FX2 is effect 14,
+; from aux $6000; FX3 is effects 15 on, from main $A000.
 fx_count:
         .byte NFX
 fx_table:
@@ -227,95 +346,21 @@ fx_table:
         .byte 1, 3              ; 13 Rainstorm
         .word __FX14_LOAD__, __FX14_SIZE__
         .byte 1, 1              ; 14 Fish!
-
-; ---------------------------------------------------------------- loader
-; fx_stash: copy main $2000-$5FFF, where HELLO loaded the FX file, to the
-; same addresses in aux memory. Once, at start; Ctrl-Reset keeps the copy.
-fx_stash:
-        stz LSRC
-        lda #>FXSTORE
-        sta LSRC+1
-        ldy #0
-        sta WRCARDRAM           ; writes to aux; reads (and this code) main
-@copy:  lda (LSRC),y
-        sta (LSRC),y
-        iny
-        bne @copy
-        inc LSRC+1
-        lda LSRC+1
-        cmp #>FXSTORE_END
-        bne @copy
-        sta WRMAINRAM
-        rts
-
-; lc_install: put aux_fetch and aux_copy into language-card RAM. setup calls
-; it once the card's RAM is switched in.
-lc_install:
-        ldx #<__LCCODE_SIZE__
-:       lda __LCCODE_LOAD__-1,x
-        sta aux_fetch-1,x
-        dex
-        bne :-
-        rts
-
-; load_fx: copy effect A's code from aux memory into the overlay slot, in
-; whole pages (the slot is whole pages, so the overrun stays inside it).
-load_fx:
-        asl a                   ; X = A * 6
-        sta LSRC
-        asl a
-        clc
-        adc LSRC
-        tax
-        lda fx_table,x
-        sta LSRC
-        lda fx_table+1,x
-        sta LSRC+1
-        stz LDST
-        lda #>OVL
-        sta LDST+1
-        lda fx_table+2,x        ; pages = size high byte, plus one if the
-        cmp #1                  ; low byte isn't 0
-        lda fx_table+3,x
-        adc #0
-        tax                     ; never 0: every overlay starts with two jmps
-        jmp aux_fetch           ; (0 would copy 256 pages over everything)
-
-.segment "ONCE"
-; Run once, from BASIC, so it sits after all the resident code: code added
-; here doesn't move the drawing routines' loops, whose timing can depend on
-; where they cross page boundaries.
-; fx2_stash: copy main $2000-$5FFF, where HELLO has just loaded the FX2 file,
-; to aux $6000-$9FFF. HELLO calls it from BASIC before loading FX over the
-; same memory, so it keeps to zero page $06-$09, leaves interrupts as they
-; are, and returns to BASIC with writes back on main.
-fx2_stash:
-        ldy #0
-        sty F2SRC
-        sty F2DST
-        lda #>FXSTORE
-        sta F2SRC+1
-        lda #>FXSTORE2
-        sta F2DST+1
-        sta WRCARDRAM           ; writes to aux; reads (and this code) main
-@copy:  lda (F2SRC),y
-        sta (F2DST),y
-        iny
-        bne @copy
-        inc F2SRC+1
-        inc F2DST+1
-        lda F2DST+1
-        cmp #>FXSTORE2_END
-        bne @copy
-        sta WRMAINRAM
-        rts
+        .word __FX15_LOAD__, __FX15_SIZE__
+        .byte 1, 3              ; 15 Hard Rain
+        .word __FX16_LOAD__, __FX16_SIZE__
+        .byte 1, 2              ; 16 Snake
+        .word __FX17_LOAD__, __FX17_SIZE__
+        .byte 1, 6              ; 17 Life II
 
 .segment "LCCODE"
 ; aux_fetch: copy X pages from aux memory at LSRC to main memory at LDST.
 ; It runs from language-card RAM because while RAMRD is on, the CPU would
 ; fetch its own instructions from aux too if they were in $0200-$BFFF.
+; main_fetch: the same copy, from main memory.
 aux_fetch:
         sta RDCARDRAM
+main_fetch:
         ldy #0
 @copy:  lda (LSRC),y
         sta (LDST),y

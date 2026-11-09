@@ -35,6 +35,11 @@ def test_disk_has_fx2(built):
     assert (built / "fx2.bin").stat().st_size <= 0x4000          # aux $6000-$9FFF
 
 
+def test_disk_has_fx3(built):
+    assert catalog(built).get("FX3") == "B"
+    assert (built / "fx3.bin").stat().st_size <= 0x2000          # main $A000-$BFFF
+
+
 def test_no_speaker_refs():
     for path in (ROOT / "src").glob("*"):
         text = path.read_text(errors="replace")

@@ -1,8 +1,9 @@
-"""The effect loader. HELLO loads the second effects file (FX2) at $2000 and
-calls fx2_stash, which copies it to aux $6000-$9FFF; then it loads every other
-effect (the FX file) at $2000, and start copies $2000-$5FFF to aux memory. Each
-effect's code is copied from aux into the overlay slot at $8800 when its turn
-comes."""
+"""The effect loader. HELLO loads the FX2 file at $2000 and calls fx2_stash,
+which copies it to aux $6000-$9FFF; it loads the FX3 file at $2000 and calls
+fx3_stash, which copies it to aux $A000-$BFFF; then it loads the FX file at
+$2000, and start copies $2000-$5FFF to aux memory and moves FX3 on to main
+$A000-$BFFF. Each effect's code is copied into the overlay slot at $8800 when
+its turn comes."""
 import random
 
 import pytest
@@ -14,7 +15,9 @@ from sim import Sim
 OVL, OVL_END = 0x8800, 0x9600
 FX_BASE, FX_END = 0x2000, 0x6000
 FX2_BASE, FX2_END = 0x6000, 0xA000
+FX3_BASE, FX3_END = 0xA000, 0xC000
 FX2_FIRST = 14                  # the first effect in FX2
+FX3_FIRST = 15                  # the first effect in FX3
 
 
 def fx_file():
@@ -25,8 +28,14 @@ def fx2_file():
     return (BUILD / "fx2.bin").read_bytes()
 
 
+def fx3_file():
+    return (BUILD / "fx3.bin").read_bytes()
+
+
 def code(a, size):
-    """An effect's code, from whichever file holds aux address a."""
+    """An effect's code, from whichever file holds address a."""
+    if FX3_BASE <= a < FX3_END:
+        return fx3_file()[a - FX3_BASE:a - FX3_BASE + size]
     if FX2_BASE <= a < FX2_END:
         return fx2_file()[a - FX2_BASE:a - FX2_BASE + size]
     return fx_file()[a - FX_BASE:a - FX_BASE + size]
@@ -71,8 +80,13 @@ def test_table_matches_the_files(s):
 
     ents = entries(s)
     assert back_to_back(ents[:FX2_FIRST], FX_BASE) == len(fx_file())
-    # FX2 holds effect 14 on, then Fish!'s art and floor
-    assert 0 < back_to_back(ents[FX2_FIRST:], FX2_BASE) < len(fx2_file())
+    # FX2 holds effect 14, then Fish!'s art and floor
+    assert 0 < back_to_back(ents[FX2_FIRST:FX3_FIRST], FX2_BASE) < len(fx2_file())
+    assert back_to_back(ents[FX3_FIRST:], FX3_BASE) <= len(fx3_file())
+
+
+def test_fx3_file_fits(built):
+    assert 0 < len(fx3_file()) <= FX3_END - FX3_BASE
 
 
 def test_stash_copies_to_aux(built):
@@ -103,6 +117,54 @@ def test_fx2_stash_copies_to_aux(built):
     after = bytes(s.mem.ram)
     changed = [a for a in range(0x10000) if before[a] != after[a] and not 0x100 <= a < 0x200]
     assert all(0x06 <= a <= 0x09 for a in changed), [hex(a) for a in changed]
+
+
+def test_fx3_stash_copies_to_aux(built):
+    """HELLO calls fx3_stash ($6006) from BASIC, under the same rules as
+    fx2_stash; only the first 8K at $2000 is FX3."""
+    s = Sim()
+    assert s.addr("fx3_stash") == s.peek16(0x6007) and s.peek(0x6006) == 0x4C
+    rnd = random.Random(7)
+    junk = bytes(rnd.randrange(256) for _ in range(FX3_END - FX3_BASE))
+    s.mem.ram[FX_BASE:FX_BASE + len(junk)] = junk
+    before = bytes(s.mem.ram)
+    s.call("fx3_stash", max_cycles=2_000_000)
+    assert bytes(s.mem.aux[FX3_BASE:FX3_END]) == junk
+    assert bytes(s.mem.aux[:FX3_BASE]) == bytes(FX3_BASE), "aux below $A000 untouched"
+    assert not s.mem.rd_aux and not s.mem.wr_aux
+    after = bytes(s.mem.ram)
+    changed = [a for a in range(0x10000) if before[a] != after[a] and not 0x100 <= a < 0x200]
+    assert all(0x06 <= a <= 0x09 for a in changed), [hex(a) for a in changed]
+
+
+def test_fx3_restore_copies_to_main(built):
+    s = Sim()
+    s.call("lc_install")
+    rnd = random.Random(8)
+    junk = bytes(rnd.randrange(256) for _ in range(FX3_END - FX3_BASE))
+    s.mem.aux[FX3_BASE:FX3_END] = junk
+    s.call("fx3_restore", max_cycles=2_000_000)
+    assert bytes(s.mem.ram[FX3_BASE:FX3_END]) == junk
+    assert not s.mem.rd_aux and not s.mem.wr_aux
+
+
+def test_fx3_effect_survives_aux_overwrite(s):
+    """Fish! builds tables over aux $A000 up; FX3's effects load from main."""
+    s.mem.aux[FX3_BASE:FX3_END] = bytes([0xA5]) * (FX3_END - FX3_BASE)
+    a, size = entries(s)[FX3_FIRST]
+    s.mem.ram[OVL:OVL_END] = bytes(OVL_END - OVL)
+    s.call("load_fx", a=FX3_FIRST)
+    assert bytes(s.mem.ram[OVL:OVL + size]) == code(a, size)
+
+
+def test_setup_leaves_fx3_alone(s):
+    """Ctrl-Reset runs setup again. Fish! may have overwritten the aux copy by
+    then, so main $A000-$BFFF must simply be left as it is."""
+    s.mem.aux[FX3_BASE:FX3_END] = bytes([0xA5]) * (FX3_END - FX3_BASE)
+    before = bytes(s.mem.ram[FX3_BASE:FX3_END])
+    s.call("setup", max_cycles=40_000_000)
+    assert bytes(s.mem.ram[FX3_BASE:FX3_END]) == before
+    assert s.addr("restart")
 
 
 def test_load_each_effect(s):

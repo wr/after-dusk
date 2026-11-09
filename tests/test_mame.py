@@ -34,7 +34,7 @@ def test_timing(built):
 
 
 def test_pacing(built):
-    run_mame("pacing.lua", 400)
+    run_mame("pacing.lua", 600)
 
 
 @pytest.fixture(scope="session")

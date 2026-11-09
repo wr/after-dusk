@@ -16,11 +16,12 @@ It also runs on an enhanced IIe with 128K (tested in MAME), where `timing_init` 
 vertical-blank latch, so every effect is paced by the cycle-counted fallback.
 
 The resident 65C02 program, `AFTERDUSK`, loads at `$6000` from a DOS 3.3 disk. Every effect is
-linked into one of two more files, `FX` (effects 0-13) and `FX2` (Fish!, with its art and sea
-floor), which HELLO loads at `$2000` in turn just before `BRUN AFTERDUSK`. After Dusk copies
-them to aux memory at start-up (`FX` at `$2000`, `FX2` at `$6000`), and copies each effect from
-there into the overlay slot at `$8800` when its turn comes, so the disk is never touched after
-boot. Fish! also copies its drawing code into FXRAM and the language card when it starts, and
+linked into one of three more files, `FX` (effects 0-13), `FX2` (Fish!, with its art and sea
+floor) and `FX3` (effects 15 on), which HELLO loads at `$2000` in turn, handing each to
+`AFTERDUSK` to put away. `FX` and `FX2` stay in aux memory (`FX` at `$2000`, `FX2` at `$6000`).
+`FX3` waits in aux `$A000` until the last file is loaded, then moves to main `$A000`, which DOS
+no longer needs. Each effect is copied from there into the overlay slot at `$8800` when its turn
+comes, so the disk is never touched after boot. Fish! also copies its drawing code into FXRAM and the language card when it starts, and
 reads its art from `FX2` in aux as it draws.
 
 ## Commands
@@ -48,12 +49,14 @@ Needs `ca65`/`ld65` (cc65) and `mame` on PATH. Emulator ROM images are not in th
   `jmp init` and `jmp step`. Fish! (`fx_fish.s`) includes `fish_draw.inc` (its cache engine:
   pre-shifted creatures composed row by row, every piece paid for before it runs) and
   `fish_init.inc` (its init-only code). To add one: a segment and an `OVLn` area in
-  `after-dusk.cfg`, loaded from `FXFILE2` (`FX2`) rather than `FXFILE`; in `main.s` the
+  `after-dusk.cfg`, loaded from `FXFILE3` (`FX3`); in `main.s` the
   `.import __FXn_LOAD__, __FXn_SIZE__` line and entries in `fx_table` and `fx_slow`; `NFX` in
-  `config.inc` and `tests/fxcommon.py`. Both files are nearly full (FX 15,970 and FX2 16,021 of
-  16,384 bytes): another effect needs room made or a third file.
+  `config.inc` and `tests/fxcommon.py`. FX and FX2 are nearly full (15,970 and 16,021 of 16,384
+  bytes); FX3 has room (4,372 of 8,192). `main.s`'s `CODE` is padded to a fixed size so the
+  routines linked after it keep the addresses their timing was measured at: put new data in
+  `FXTABLE` or `ONCE`.
 - `basic/hello.bas` the HELLO program: bumps a seed in the text file `SEED`, POKEs it to `$0300`,
-  then `BLOAD FX` and `BRUN AFTERDUSK`.
+  loads `AFTERDUSK` and the effects files, then `CALL 24576` to start.
 - `tools/` generators (`gen_tables.py`, `gen_art.py`), `bootstrap.sh`, FloppyEmu tools.
 - `vendor/dos33-master-jan83.dsk` the base disk image (see `THIRD-PARTY-NOTICES.md`).
 - `tests/` host tests on the py65 simulator (`sim.py`), emulator tests in `tests/mame/`.
@@ -73,13 +76,14 @@ Memory:
 | `$0300`–`$0301` | seed from HELLO |
 | `$0310`–`$031F` | status block for tests |
 | `$0800`–`$1FFF` | `FXRAM`, private to the running effect (Fish!: its live background `$0800`, drawing code `$0E00`, state `$1C00`) |
-| `$2000` / `$4000` | hi-res page 1 / page 2 (the FX files sit here until start-up copies them; Fish! fills page 2 with its caches and kernels, and shows page 1 only) |
+| `$2000` / `$4000` | hi-res page 1 / page 2 (the FX files sit here until start-up copies them; Fish! fills page 2 with its caches and kernels and shows page 1 only; Snake draws its next maze on the hidden page; Life II keeps its board in page 2 and shows page 1) |
 | `$6000`–`$87FF` | the resident program (10,240 bytes max) |
 | `$8800`–`$95FF` | overlay slot: the running effect's code (3,584 bytes max per effect) |
+| `$A000`–`$BFFF` | the FX3 file: effects 15 on (8K max), once DOS is finished with |
 | `$D000`–`$F5FF` | language card bank 1: pre-shifted sprites and Warp's tables, built at startup |
 | `$F600`–`$F6FF` | language card: `aux_fetch` and `aux_copy`, the copy loops that read aux memory |
 | `$F700`–`$FFF9` | language card: Fish!'s code that reads aux memory (copied from FX2 when it starts); `$FFFA`–`$FFFF` are the vectors, never written |
-| aux `$0800`–`$1FFF`, `$A000`–`$BFFF` | Fish!'s shift tables and a mirrored copy of its art, built when it starts |
+| aux `$0800`–`$1FFF`, `$A000`–`$BFFF` | Fish!'s shift tables and a mirrored copy of its art, built when it starts (aux `$A000` also holds FX3 briefly during boot) |
 | aux `$2000`–`$5FFF` | the FX file: effects 0-13, one after another (16K max) |
 | aux `$6000`–`$9FFF` | the FX2 file: Fish!'s code, art and sea floor, read in place (16K max) |
 
@@ -88,7 +92,7 @@ Status block: `$0310` current effect (`$FF` before the first), `$0311` effects s
 
 Effect ids: 0 Flying Toasters, 1 Warp, 2 Starry Night, 3 Zot!, 4 Can of Worms, 5 Lissajous,
 6 Nightlines, 7 String Theory, 8 Rose, 9 Doodles, 10 Shapes, 11 Spheres, 12 Bouncing Ball,
-13 Rainstorm, 14 Fish!.
+13 Rainstorm, 14 Fish!, 15 Hard Rain, 16 Snake, 17 Life II.
 
 Each effect's step must finish inside its ticks on a 1 MHz IIc (`tests/fxcommon.py`
 checks the worst step against `ticks × 17,030 − 300` cycles and the median against 85% of
@@ -124,6 +128,14 @@ frames to a deadline. `tests/mame/pacing.lua` checks every effect's real rate. F
   start a tick early) except, rarely (about once in five minutes), when three creatures cross
   over the floor; every step still fits its tick, and without a vertical blank the step pads
   itself to a tick (`tests/mame/fish_rate.lua`).
+- Hard Rain: up to 10 drops at 3 ticks, rings up to radius 9. Centres stay where a whole ring
+  fits, so rings are never clipped.
+- Snake: a 38 x 26 maze, one cell a step at 2 ticks (30 cells a second, as the original). The next
+  maze is generated and drawn on the hidden page in pieces during the 3-second hold, and shown by
+  a page flip.
+- Life II: 40 x 32 cells at 6 ticks (10 generations a second). A new 25% scatter replaces the
+  board when the population stays within 2 for more than 40 generations, or falls under 6. The
+  scatter is a step of its own.
 
 Speeds follow the originals, timed from video of the real After Dark modules (Afterglow);
 where the IIc draws fewer updates a second, each update moves further.

@@ -2,7 +2,7 @@
 from conftest import BUILD
 from sim import PAGE1, PAGE2, ST_FX, ST_TIMING, Sim
 
-NFX = 15                        # effects (fx_count)
+NFX = 18                        # effects (fx_count)
 OVL = 0x8800                    # the overlay slot: jmp init, jmp step
 
 # Writes an effect may make: drawing scratch, RNG and core scratch, DISP,

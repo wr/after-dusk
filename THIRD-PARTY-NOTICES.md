@@ -18,7 +18,7 @@ holds the copyright, its license status, and how it's used.
   of ownership and no affiliation with Apple, and will be removed on a rights holder's request.
 - In repo: yes.
 - In release: yes. `build.sh` copies this master, replaces its `HELLO` program, and adds
-  `AFTERDUSK`, `FX`, `FX2` and `SEED` to produce `AFTERDUSK.dsk`. The DOS 3.3 boot code and file system
+  `AFTERDUSK`, `FX`, `FX2`, `FX3` and `SEED` to produce `AFTERDUSK.dsk`. The DOS 3.3 boot code and file system
   in `AFTERDUSK.dsk` are Apple's.
 
 ## dos33fsprogs (build tool only)
